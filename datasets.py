@@ -6,6 +6,7 @@ import numpy as np
 import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
+from utils import pad_zero
 
 
 # furniture class labels
@@ -73,34 +74,34 @@ def filter_data(data):
     # Load data
     with open(data_path, "rb") as tf:
         data = pickle.load(tf)
-    faceEdge_adj, surf_bbox, edge_bbox, ff_edges = (data['faceEdge_adj'], data['surf_bbox_wcs'],
-                                                    data['edge_bbox_wcs'], data['ff_edges'])
+    faceEdge_adj, face_bbox, edge_bbox, fe_topo = (data['faceEdge_adj'], data['face_bbox_wcs'],
+                                                   data['edge_bbox_wcs'], data['fe_topo'])
 
     # Skip over max edge-classes
-    if ff_edges.max() >= edge_classes:
+    if fe_topo.max() >= edge_classes:
         return None, None
 
     # Skip over max size data
-    if len(surf_bbox) > max_face:
+    if len(face_bbox) > max_face:
         return None, None
 
-    for surf_edges in faceEdge_adj:
-        if len(surf_edges) > max_edge:
+    for face_edges in faceEdge_adj:
+        if len(face_edges) > max_edge:
             return None, None
 
-    # Skip surfaces too close to each other
-    surf_bbox = surf_bbox * scaled_value  # make bbox difference larger
+    # Skip faces too close to each other
+    face_bbox = face_bbox * scaled_value  # make bbox difference larger
 
-    _surf_bbox_ = surf_bbox.reshape(len(surf_bbox), 2, 3)
-    non_repeat = _surf_bbox_[:1]
-    for bbox in _surf_bbox_:
+    _face_bbox_ = face_bbox.reshape(len(face_bbox), 2, 3)
+    non_repeat = _face_bbox_[:1]
+    for bbox in _face_bbox_:
         diff = np.max(np.max(np.abs(non_repeat - bbox), -1), -1)
         same = diff < threshold_value
         if same.sum() >= 1:
             continue  # repeat value
         else:
             non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
-    if len(non_repeat) != len(_surf_bbox_):
+    if len(non_repeat) != len(_face_bbox_):
         return None, None
 
     # Skip edges too close to each other
@@ -162,20 +163,8 @@ def load_data(input_data, input_list, validate, args):
     return loaded_data
 
 
-def pad_zero(x, max_len, return_mask=False):
-    keys = np.ones(len(x))
-    padding = np.zeros((max_len-len(x))).astype(int)
-    mask = 1-np.concatenate([keys, padding]) == 1
-    padding = np.zeros((max_len-len(x), *x.shape[1:]))
-    x_padded = np.concatenate([x, padding], axis=0)
-    if return_mask:
-        return x_padded, mask
-    else:
-        return x_padded
-
-
-class SurfData(torch.utils.data.Dataset):
-    """ Surface VAE Dataloader """
+class FaceVaeData(torch.utils.data.Dataset):
+    """ Face VAE Dataloader """
 
     def __init__(self, input_data, input_list, validate=False, aug=False):
         self.validate = validate
@@ -196,8 +185,8 @@ class SurfData(torch.utils.data.Dataset):
 
                 with open(path, "rb") as tf:
                     data = pickle.load(tf)
-                surf_uv = data['surf_ncs']
-                datas.append(surf_uv)
+                face_uv = data['face_ncs']
+                datas.append(face_uv)
             self.data = np.vstack(datas)
 
         # Load training data (deduplicated)
@@ -213,15 +202,15 @@ class SurfData(torch.utils.data.Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        surf_uv = self.data[index]
+        face_uv = self.data[index]
         if np.random.rand() > 0.5 and self.aug:
             for axis in ['x', 'y', 'z']:
                 angle = random.choice([90, 180, 270])
-                surf_uv = rotate_point_cloud(surf_uv.reshape(-1, 3), angle, axis).reshape(32, 32, 3)
-        return torch.FloatTensor(surf_uv)
+                face_uv = rotate_point_cloud(face_uv.reshape(-1, 3), angle, axis).reshape(32, 32, 3)
+        return torch.FloatTensor(face_uv)
 
 
-class EdgeData(torch.utils.data.Dataset):
+class EdgeVaeData(torch.utils.data.Dataset):
     """ Edge VAE Dataloader """
 
     def __init__(self, input_data, input_list, validate=False, aug=False):
@@ -270,8 +259,8 @@ class EdgeData(torch.utils.data.Dataset):
         return torch.FloatTensor(edge_u)
 
 
-class SurfGraphData(torch.utils.data.Dataset):
-    """ Surface Feature and Edge Topology Dataloader """
+class FaceEdgeTopoData(torch.utils.data.Dataset):
+    """ Face Bounding Box and Edge-Face Topology Dataloader """
 
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         self.max_face = args.max_face
@@ -280,17 +269,12 @@ class SurfGraphData(torch.utils.data.Dataset):
         self.aug = aug
         # Load data
         self.data = load_data(input_data, input_list, validate, args)
+
         # Inflate furniture x50 times for training
-        if len(self.data) < 2000 and not validate:
-            self.data = self.data * 12
-        # if not validate:
-        #     with open('SurfGraph_train_datas.pkl', 'rb') as f:
-        #         self.data = pickle.load(f)
-        # else:
-        #     with open('SurfGraph_val_datas.pkl', 'rb') as f:
-        #         self.data = pickle.load(f)
+        # if len(self.data) < 2000 and not validate:
+        #     self.data = self.data * 3
+
         print("train" if not validate else "val", len(self.data))
-        return
 
     def __len__(self):
         return len(self.data)
@@ -305,40 +289,36 @@ class SurfGraphData(torch.utils.data.Dataset):
 
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
-        surf_ncs, surf_pos, ff_edges = data['surf_ncs'], data['surf_bbox_wcs'], data['ff_edges']
+        face_bbox, fe_topo = data['face_bbox_wcs'], data['fe_topo']   # num_faces*6, num_faces*num_faces
 
         # Make bbox range larger
-        surf_pos = surf_pos * self.bbox_scaled
+        face_bbox = face_bbox * self.bbox_scaled
 
         # Randomly shuffle the sequence
-        random_indices = np.random.permutation(surf_pos.shape[0])
-        surf_pos = surf_pos[random_indices]   # num_faces*6
-        surf_ncs = surf_ncs[random_indices]   # num_faces*32*32*3
+        random_indices = np.random.permutation(face_bbox.shape[0])
+        face_bbox = face_bbox[random_indices]
+        fe_topo = fe_topo[random_indices, :]
+        fe_topo = fe_topo[:, random_indices]
 
-        # Pad data
-        # surf_pos, surf_mask = pad_zero(surf_pos, self.max_face, return_mask=True)
-        # surf_ncs = pad_zero(surf_ncs, self.max_face)
+        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face+1, dim=0)  # max_faces*6, max_faces, max_faces
+        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face+1, dim=1)   # max_faces*max_faces
 
         if data_class is not None:
             return (
-                torch.FloatTensor(surf_pos),
-                torch.FloatTensor(surf_ncs),
-                torch.from_numpy(ff_edges),
-                # torch.BoolTensor(surf_mask),
+                torch.FloatTensor(face_bbox),   # max_faces*6, max_faces
+                torch.from_numpy(fe_topo),      # max_faces*max_faces
+                torch.from_numpy(mask),         # max_faces
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
-                torch.FloatTensor(surf_pos),
-                torch.FloatTensor(surf_ncs),
-                torch.from_numpy(ff_edges),
-                # torch.BoolTensor(surf_mask),
+                torch.FloatTensor(face_bbox),
+                torch.from_numpy(fe_topo),
+                torch.from_numpy(mask),  # max_faces
             )  # abc or deepcad
 
 
-class EdgeGraphData(torch.utils.data.Dataset):
-    """ Edge Feature Dataloader """
-
+class FaceGeomData(torch.utils.data.Dataset):
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
@@ -348,9 +328,8 @@ class EdgeGraphData(torch.utils.data.Dataset):
         # Load data
         self.data = load_data(input_data, input_list, validate, args)
         # Inflate furniture x50 times for training
-        if len(self.data) < 2000 and not validate:
-            self.data = self.data * 4
-        return
+        # if len(self.data) < 2000 and not validate:
+        #     self.data = self.data * 50
 
     def __len__(self):
         return len(self.data)
@@ -366,35 +345,114 @@ class EdgeGraphData(torch.utils.data.Dataset):
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
 
-        surf_ncs, edge_ncs, edgeFace_adj, surf_pos, edge_pos = (
-            data['surf_ncs'],         # nf*32*32*3
+        face_ncs, fe_topo, face_bbox = (
+            data['face_ncs'],          # nf*32*32*3
+            data['fe_topo'],           # nf*nf
+            data['face_bbox_wcs'],     # nf*6
+        )
+
+        # Increase value range
+        face_bbox = face_bbox * self.bbox_scaled    # nf*6
+
+        # Randomly shuffle the sequence
+        random_indices = np.random.permutation(face_bbox.shape[0])
+        face_ncs = face_ncs[random_indices]
+        face_bbox = face_bbox[random_indices]
+        fe_topo = fe_topo[random_indices, :]
+        fe_topo = fe_topo[:, random_indices]
+
+        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face + 1, dim=0)  # max_faces*6, max_faces
+        face_ncs, _ = pad_zero(face_ncs, max_len=self.max_face + 1, dim=0)
+        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face + 1, dim=1)  # max_faces*max_faces
+
+        if data_class is not None:
+            return (
+                torch.FloatTensor(face_ncs),       # max_faces*32*32*3
+                torch.FloatTensor(face_bbox),      # max_faces*6
+                torch.from_numpy(fe_topo),        # max_faces*max_faces
+                torch.from_numpy(mask),           # # max_faces
+                torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
+            )
+        else:
+            return (
+                torch.FloatTensor(face_ncs),  # max_faces*32*32*3
+                torch.FloatTensor(face_bbox),  # max_faces*6
+                torch.from_numpy(fe_topo),  # max_faces*max_faces
+                torch.from_numpy(mask),  # # max_faces     # uncond deepcad/abc
+            )
+
+
+class EdgeGeomData(torch.utils.data.Dataset):
+    """ Edge Feature Dataloader """
+
+    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+        self.max_face = args.max_face
+        self.max_edge = args.max_edge
+        self.max_num_edge = args.max_num_edge
+        self.bbox_scaled = args.bbox_scaled
+        self.aug = aug
+        self.data = []
+        # Load data
+        self.data = load_data(input_data, input_list, validate, args)
+        # Inflate furniture x50 times for training
+        # if len(self.data) < 2000 and not validate:
+        #     self.data = self.data * 25
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        # Load data
+        data_class = None
+        if isinstance(self.data[index], tuple):
+            data_path, data_class = self.data[index]
+        else:
+            data_path = self.data[index]
+
+        with open(data_path, "rb") as tf:
+            data = pickle.load(tf)
+
+        face_ncs, edge_ncs, edgeFace_adj, face_bbox, edge_bbox = (
+            data['face_ncs'],         # nf*32*32*3
             data['edge_ncs'],         # ne*32*3
             data['edgeFace_adj'],     # ne*2
-            data['surf_bbox_wcs'],    # nf*6
+            data['face_bbox_wcs'],    # nf*6
             data['edge_bbox_wcs']     # ne*6
         )
 
         # Increase value range
-        surf_pos = surf_pos * self.bbox_scaled
-        edge_pos = edge_pos * self.bbox_scaled
+        face_bbox = face_bbox * self.bbox_scaled    # nf*32*32*3
+        edge_bbox = edge_bbox * self.bbox_scaled    # ne*6
 
-        edge_surf_ncs = surf_ncs[edgeFace_adj]   # ne*2*32*32*3
-        edge_surf_pos = surf_pos[edgeFace_adj]   # ne*2*6
+        edge_face_ncs = face_ncs[edgeFace_adj]   # ne*2*32*32*3
+        edge_face_bbox = face_bbox[edgeFace_adj]   # ne*2*6
+
+        random_indices = np.random.permutation(edge_bbox.shape[0])
+        edge_bbox = edge_bbox[random_indices]
+        edge_face_ncs = edge_face_ncs[random_indices]
+        edge_face_bbox = edge_face_bbox[random_indices]
+        edge_ncs = edge_ncs[random_indices]    # ne*32*3
+
+        edge_bbox, mask = pad_zero(edge_bbox, max_len=self.max_num_edge+1, dim=0)
+        edge_face_ncs, _ = pad_zero(edge_face_ncs, max_len=self.max_num_edge+1, dim=0)
+        edge_face_bbox, _ = pad_zero(edge_face_bbox, max_len=self.max_num_edge+1, dim=0)
+        edge_ncs, _ = pad_zero(edge_ncs, max_len=self.max_num_edge+1, dim=0)
 
         if data_class is not None:
             return (
                 torch.FloatTensor(edge_ncs),
-                torch.FloatTensor(edge_pos),
-                torch.FloatTensor(edge_surf_ncs),
-                torch.FloatTensor(edge_surf_pos),
+                torch.FloatTensor(edge_bbox),
+                torch.FloatTensor(edge_face_ncs),
+                torch.FloatTensor(edge_face_bbox),
+                torch.from_numpy(mask),  # max_num_edge
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
                 torch.FloatTensor(edge_ncs),
-                torch.FloatTensor(edge_pos),
-                torch.FloatTensor(edge_surf_ncs),
-                torch.FloatTensor(edge_surf_pos),   # uncond deepcad/abc
+                torch.FloatTensor(edge_bbox),
+                torch.FloatTensor(edge_face_ncs),
+                torch.FloatTensor(edge_face_bbox),
+                torch.from_numpy(mask),  # max_num_edge
             )
-
 

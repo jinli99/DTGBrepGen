@@ -9,13 +9,6 @@ from hashlib import sha256
 import numpy as np
 
 
-### Dedupliate Furniture ###
-# Deduplicate repeatd CAD B-rep (LDM training)
-# python deduplicate_cad.py --data furniture_parsed --bit 6 --option 'furniture'
-# # Deduplicate repeated surface & edge (VAE training)
-# python deduplicate_surfedge.py --data furniture_parsed --list furniture_data_split_6bit.pkl --bit 6 --option 'furniture'
-# python deduplicate_surfedge.py --data furniture_parsed --list furniture_data_split_6bit.pkl --bit 6 --edge --option 'furniture'
-
 def create_parser():
     """Create the base argument parser"""
     parser = argparse.ArgumentParser()
@@ -31,10 +24,10 @@ def args_deduplicate_cad(known_args):
     return parser.parse_args(known_args)
 
 
-def args_deduplicate_surfedge(known_args):
+def args_deduplicate_facEdge(known_args):
     parser = create_parser()
     parser.add_argument("--list", type=str, default='furniture_data_split_6bit.pkl', help="UID list")
-    parser.add_argument("--type", type=str, choices=['surface', 'edge'], default='edge', help='Process edge or surface')
+    parser.add_argument("--type", type=str, choices=['face', 'edge'], default='edge', help='Process edge or face')
     return parser.parse_args(known_args)
 
 
@@ -145,14 +138,14 @@ def load_pkl_data(path):
     return data
 
 
-def hash_surface_points(surfs_wcs, n_bits):
+def hash_face_points(faces_wcs, n_bits):
     """Hash the surface sampled points."""
-    surf_hash_total = []
-    for surf in surfs_wcs:
-        np_bit = real2bit(surf, n_bits=n_bits).reshape(-1, 3)
+    face_hash_total = []
+    for face in faces_wcs:
+        np_bit = real2bit(face, n_bits=n_bits).reshape(-1, 3)
         data_hash = sha256(np_bit.tobytes()).hexdigest()
-        surf_hash_total.append(data_hash)
-    return '_'.join(sorted(surf_hash_total))
+        face_hash_total.append(data_hash)
+    return '_'.join(sorted(face_hash_total))
 
 
 def save_unique_data(save_path, unique_data):
@@ -163,8 +156,8 @@ def save_unique_data(save_path, unique_data):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", type=str, choices=['cad', 'surfedge'],
-                        default='surfedge', help="Specify which function to call")
+    parser.add_argument("--name", type=str, choices=['cad', 'facEdge'],
+                        default='facEdge', help="Specify which function to call")
     args, unknown = parser.parse_known_args()
 
     if args.name == 'cad':
@@ -190,8 +183,8 @@ def main():
                 path = os.path.join(cad_args.data, str(math.floor(int(uid.split('.')[0]) / 10000)).zfill(4), uid)
             data = load_pkl_data(path)
 
-            # Hash the surface sampled points
-            data_hash = hash_surface_points(data['surf_wcs'], cad_args.bit)
+            # Hash the face sampled points
+            data_hash = hash_face_points(data['face_wcs'], cad_args.bit)
 
             # Save non-duplicate shapes
             prev_len = len(unique_hash)
@@ -210,26 +203,26 @@ def main():
         }
         save_unique_data(f'{cad_args.option}_data_split_{cad_args.bit}bit.pkl', data_path)
 
-    elif args.name == 'surfedge':
-        surfedge_args = args_deduplicate_surfedge(unknown)
-        print("SurfEdge args:", surfedge_args)
+    elif args.name == 'facEdge':
+        facEdge_args = args_deduplicate_facEdge(unknown)
+        print("facEdge args:", facEdge_args)
 
-        data_list = load_pkl_data(surfedge_args.list)['train']
+        data_list = load_pkl_data(facEdge_args.list)['train']
 
         unique_data = []
         unique_hash = set()
         total = 0
 
         for path_idx, uid in tqdm(enumerate(data_list)):
-            if surfedge_args.option == 'furniture':
-                path = os.path.join(surfedge_args.data, uid)
+            if facEdge_args.option == 'furniture':
+                path = os.path.join(facEdge_args.data, uid)
             else:
-                path = os.path.join(surfedge_args.data, str(math.floor(int(uid.split('.')[0]) / 10000)).zfill(4), uid)
+                path = os.path.join(facEdge_args.data, str(math.floor(int(uid.split('.')[0]) / 10000)).zfill(4), uid)
             data = load_pkl_data(path)
-            surf_ncs, edge_ncs = data['surf_ncs'], data['edge_ncs']
-            data = edge_ncs if surfedge_args.type == 'edge' else surf_ncs
+            face_ncs, edge_ncs = data['face_ncs'], data['edge_ncs']
+            data = edge_ncs if facEdge_args.type == 'edge' else face_ncs
 
-            data_bits = real2bit(data, n_bits=surfedge_args.bit)
+            data_bits = real2bit(data, n_bits=facEdge_args.bit)
 
             for np_bit, np_real in zip(data_bits, data):
                 total += 1
@@ -247,7 +240,7 @@ def main():
             if path_idx % 2000 == 0:
                 print(len(unique_hash) / total)
 
-        save_unique_data(surfedge_args.list.split('.')[0] + f'_{surfedge_args.type}.pkl', unique_data)
+        save_unique_data(facEdge_args.list.split('.')[0] + f'_{facEdge_args.type}.pkl', unique_data)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-import argparse
 import torch.nn.functional as ff
 import torch.nn as nn
 import torch
@@ -6,21 +5,14 @@ import numpy as np
 from utils import xe_mask, assert_weak_one_hot, make_edge_symmetric
 
 
-def get_diff_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--edge_classes', type=int, default=9, help='Number of edge classes')
-    args = parser.parse_args()
-    return args
-
-
-def face_noise_schedule(num_timesteps):
+def noise_schedule(num_timesteps):
     beta_start = 0.0001
     beta_end = 0.02
     alphas = 1. - torch.linspace(beta_start, beta_end, num_timesteps)
     return torch.cumprod(alphas, dim=0)
 
 
-def edge_num_noise_schedule(num_timesteps):
+def edge_noise_schedule(num_timesteps):
 
     # Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ.
     s = 0.008
@@ -47,15 +39,64 @@ def qt_transition(alpha, u_e, edge_classes):
     return q_t
 
 
-class GraphDiffusion(nn.Module):
+class DDPM(nn.Module):
+    def __init__(self, timesteps, device):
+        super().__init__()
+        self.T = timesteps
+        self.alphas_bar = noise_schedule(self.T).to(device)
+
+    def normalize_t(self, t):
+        return t/self.T
+
+    def add_noise(self, x_0, mask=None, t=None, noise=None):    # b*n*d, b*n
+
+        assert len(x_0.shape) == 3
+
+        if t is None:
+            t = torch.randint(0, self.T, size=(x_0.size(0), 1), device=x_0.device)   # b*1
+
+        # apply noise to face features
+        if noise is None:
+            noise = torch.randn_like(x_0)
+        alpha_t_bar = self.alphas_bar[t].view(-1, 1, 1)
+        x_t = torch.sqrt(alpha_t_bar) * x_0 + torch.sqrt(1 - alpha_t_bar) * noise
+
+        if mask is not None:
+            x_t = x_t * mask.unsqueeze(-1)  # b*n*d
+
+        return {'x_t': x_t, 'noise': noise, 't': t}
+
+    def p_sample(self, x_t, eps, t):
+        """Sample x_{t-1} ~ p(x_{t-1}|x_t)"""
+
+        assert len(t.shape) == 1 and t.shape[0] == 1
+
+        # Get the parameters for the current time step t
+        alpha_bar_t = self.alphas_bar[t]
+        alpha_bar_t_prev = self.alphas_bar[t - 1] if t > 0 else self.alphas_bar[0]
+        alpha_t = self.alphas_bar[t] / alpha_bar_t_prev if t > 0 else self.alphas_bar[0]
+
+        # Calculate the mean and variance for the posterior distribution q(x_{t-1} | x_t, x_0)
+        mean = 1/(alpha_t**0.5)*(x_t - (1-alpha_t)/((1-alpha_bar_t)**0.5)*eps)
+
+        # Calculate the variance for the posterior distribution q(x_{t-1} | x_t, x_0)
+        var = (1 - alpha_bar_t_prev) * (1 - alpha_t) / (1 - alpha_bar_t)
+        std_dev = var ** 0.5
+
+        # Sample x_{t-1} from the normal distribution with the calculated mean and standard deviation
+        noise = torch.randn_like(x_t) if t > 0 else 0
+        return mean + std_dev * noise
+
+
+class GraphDiffusion(DDPM):
     """Diffusion Models for Face Feature and Topology"""
 
-    def __init__(self, edge_classes, edge_marginals, device):
-        super(GraphDiffusion, self).__init__()
+    def __init__(self, timesteps, edge_classes, edge_marginals, device):
+        super(GraphDiffusion, self).__init__(timesteps, device)
         self.edge_classes = edge_classes
-        self.T = 500
-        self.face_alphas_bar = face_noise_schedule(self.T).to(device)
-        alphas = edge_num_noise_schedule(self.T).to(device)
+        # self.face_alphas_bar = self.alphas_bar.clone().detach()
+        # del self.alphas_bar
+        alphas = edge_noise_schedule(self.T).to(device)
         self.edge_alphas_bar = torch.exp(torch.cumsum(torch.log(alphas), dim=0))
         self.u_e = edge_marginals.unsqueeze(0).expand(self.edge_classes, -1).to(device)   # m*m
         self.eps = 1e-6
@@ -82,10 +123,7 @@ class GraphDiffusion(nn.Module):
         # out[i, j, k, l, m] = a[t[i, j, k, l], x[i, j, k, l], m]
         return a[t, x, :]
 
-    def normalize_t(self, t):
-        return t/self.T
-
-    def add_noise(self, x, e, node_mask, t=None):
+    def add_graph_noise(self, x, e, node_mask, t=None):
         """
         The diffusion process q(x_t, e_t|x_0, e_0).
 
@@ -113,9 +151,10 @@ class GraphDiffusion(nn.Module):
 
         # apply noise to face features
         noise = torch.randn_like(x)
-        alpha_t_bar = self.face_alphas_bar[t].view(-1, 1, 1)
-        x_diffused = torch.sqrt(alpha_t_bar) * x + torch.sqrt(1 - alpha_t_bar) * noise
-        x_diffused = x_diffused * node_mask.unsqueeze(-1)  # b*n*d
+        datas = self.add_noise(x, node_mask, t, noise)
+        # alpha_t_bar = self.face_alphas_bar[t].view(-1, 1, 1)
+        # x_t = torch.sqrt(alpha_t_bar) * x + torch.sqrt(1 - alpha_t_bar) * noise
+        # x_t = x_t * node_mask.unsqueeze(-1)  # b*n*d
 
         # apply noise to edge types
         probE = e.type(torch.float32) @ self.q_mats[t]  # b*n*n*m
@@ -123,18 +162,18 @@ class GraphDiffusion(nn.Module):
         # sample from edge distribution
         b, n, _, m = probE.shape
         probE_flat = probE.view(b * n * n, m)
-        edge_diffused = torch.multinomial(probE_flat, 1).view(b, n, n)  # b*n*n
-        diag_mask = torch.eye(n, dtype=torch.bool).unsqueeze(0).expand(b, -1, -1)
-        edge_diffused[diag_mask] = 0
-        edge_diffused = ff.one_hot(edge_diffused, self.edge_classes)    # b*n*n*m
-        _, edge_diffused = xe_mask(e=edge_diffused, node_mask=node_mask, check_sym=False)
-        edge_diffused = make_edge_symmetric(edge_diffused)
-        assert_weak_one_hot(edge_diffused)
+        e_t = torch.multinomial(probE_flat, 1).view(b, n, n)  # b*n*n
+        # diag_mask = torch.eye(n, dtype=torch.bool).unsqueeze(0).expand(b, -1, -1)
+        # e_t[diag_mask] = 0
+        e_t = ff.one_hot(e_t, self.edge_classes)    # b*n*n*m
+        x_t, e_t = xe_mask(x=datas['x_t'], e=e_t, node_mask=node_mask, check_sym=False)
+        e_t = make_edge_symmetric(e_t)
+        assert_weak_one_hot(e_t)
 
-        return {'x_t': x_diffused, 'e_t': edge_diffused, 'y': self.normalize_t(t), 'noise': noise, 't': t}
+        return {'x_t': x_t, 'e_t': e_t, 'y': self.normalize_t(t), 'noise': noise, 't': t}
 
     def q_posterior_logits(self, e_0, e_t, t):
-        """Compute q(e_{t-1} | e_0, e_t).
+        """Compute q(e_{t-1} | e_0, e_t).  t with shape b*1
            if t == 0, this means we return the L_0 loss, so directly try to e_0 logits.
            otherwise, we return the L_{t-1} loss."""
 
@@ -167,28 +206,14 @@ class GraphDiffusion(nn.Module):
 
         return bc
 
-    def x_p_sample(self, x_t, eps, t):
+    def x_sample(self, x_t, eps, t):
         """Sample x_{t-1} ~ p(x_{t-1}|x_t)"""
 
-        assert len(t.shape) == 1
+        assert len(t.shape) == 1 and t.shape[0] == 1
 
-        # Get the parameters for the current time step t
-        alpha_bar_t = self.face_alphas_bar[t]
-        alpha_bar_t_prev = self.face_alphas_bar[t - 1] if t > 0 else self.face_alphas_bar[0]
-        alpha_t = self.face_alphas_bar[t] / alpha_bar_t_prev if t > 0 else self.face_alphas_bar[0]
+        return self.p_sample(x_t, eps, t)
 
-        # Calculate the mean and variance for the posterior distribution q(x_{t-1} | x_t, x_0)
-        mean = 1/(alpha_t**0.5)*(x_t - (1-alpha_t)/((1-alpha_bar_t)**0.5)*eps)
-
-        # Calculate the variance for the posterior distribution q(x_{t-1} | x_t, x_0)
-        var = (1 - alpha_bar_t_prev) * (1 - alpha_t) / (1 - alpha_bar_t)
-        std_dev = var ** 0.5
-
-        # Sample x_{t-1} from the normal distribution with the calculated mean and standard deviation
-        noise = torch.randn_like(x_t) if t > 0 else 0
-        return mean + std_dev * noise
-
-    def e_p_sample(self, e_0_logits, e_t, t):
+    def e_sample(self, e_0_logits, e_t, t):
         e_t_logits = self.q_posterior_logits(e_0=e_0_logits, e_t=e_t, t=t)  # b*n*n*m
         e_t_prob = torch.softmax(e_t_logits, dim=-1)   # b*n*n*m
         b, n, _, m = e_t_prob.shape
@@ -197,47 +222,3 @@ class GraphDiffusion(nn.Module):
         e_t = make_edge_symmetric(e_t)  # b*n*n*m
         assert_weak_one_hot(e_t)
         return e_t
-
-
-class EdgeDiffusion:
-
-    def __init__(self, device):
-        self.T = 500
-        self.face_alphas_bar = face_noise_schedule(self.T).to(device)
-
-    def normalize_t(self, t):
-        return t/self.T
-
-    def add_noise(self, e, edge_mask, t=None):    # b*ne*18, b*ne
-
-        if t is None:
-            t = torch.randint(0, self.T, size=(e.size(0), 1), device=e.device)   # b*1
-
-        # apply noise to face features
-        noise = torch.randn_like(e)
-        alpha_t_bar = self.face_alphas_bar[t].view(-1, 1, 1)
-        e_diffused = torch.sqrt(alpha_t_bar) * e + torch.sqrt(1 - alpha_t_bar) * noise
-        e_diffused = e_diffused * edge_mask.unsqueeze(-1)  # b*n*d
-
-        return {'e_t': e_diffused, 'noise': noise, 't': t}
-
-    def p_sample(self, x_t, eps, t):
-        """Sample x_{t-1} ~ p(x_{t-1}|x_t)"""
-
-        assert len(t.shape) == 1
-
-        # Get the parameters for the current time step t
-        alpha_bar_t = self.face_alphas_bar[t]
-        alpha_bar_t_prev = self.face_alphas_bar[t - 1] if t > 0 else self.face_alphas_bar[0]
-        alpha_t = self.face_alphas_bar[t] / alpha_bar_t_prev if t > 0 else self.face_alphas_bar[0]
-
-        # Calculate the mean and variance for the posterior distribution q(x_{t-1} | x_t, x_0)
-        mean = 1/(alpha_t**0.5)*(x_t - (1-alpha_t)/((1-alpha_bar_t)**0.5)*eps)
-
-        # Calculate the variance for the posterior distribution q(x_{t-1} | x_t, x_0)
-        var = (1 - alpha_bar_t_prev) * (1 - alpha_t) / (1 - alpha_bar_t)
-        std_dev = var ** 0.5
-
-        # Sample x_{t-1} from the normal distribution with the calculated mean and standard deviation
-        noise = torch.randn_like(x_t) if t > 0 else 0
-        return mean + std_dev * noise

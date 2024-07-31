@@ -16,35 +16,35 @@ from occwl.entity_mapper import EntityMapper
 MAX_FACE = 70
 
 
-def normalize(surf_pnts, edge_pnts, corner_pnts):
+def normalize(face_pnts, edge_pnts, corner_pnts):
     """
     Various levels of normalization
     """
     # Global normalization to -1~1
-    total_points = np.array(surf_pnts).reshape(-1, 3)
+    total_points = np.array(face_pnts).reshape(-1, 3)
     min_vals = np.min(total_points, axis=0)
     max_vals = np.max(total_points, axis=0)
     global_offset = min_vals + (max_vals - min_vals) / 2
     global_scale = max(max_vals - min_vals)
     assert global_scale != 0, 'scale is zero'
 
-    surfs_wcs, edges_wcs, surfs_ncs, edges_ncs = [], [], [], []
+    faces_wcs, edges_wcs, faces_ncs, edges_ncs = [], [], [], []
 
     # Normalize corner
     corner_wcs = (corner_pnts - global_offset[np.newaxis, :]) / (global_scale * 0.5)
 
     # Normalize surface
-    for surf_pnt in surf_pnts:
+    for face_pnt in face_pnts:
         # Normalize CAD to WCS
-        surf_pnt_wcs = (surf_pnt - global_offset[np.newaxis, np.newaxis, :]) / (global_scale * 0.5)
-        surfs_wcs.append(surf_pnt_wcs)
+        face_pnt_wcs = (face_pnt - global_offset[np.newaxis, np.newaxis, :]) / (global_scale * 0.5)
+        faces_wcs.append(face_pnt_wcs)
         # Normalize Surface to NCS
-        min_vals = np.min(surf_pnt_wcs.reshape(-1, 3), axis=0)
-        max_vals = np.max(surf_pnt_wcs.reshape(-1, 3), axis=0)
+        min_vals = np.min(face_pnt_wcs.reshape(-1, 3), axis=0)
+        max_vals = np.max(face_pnt_wcs.reshape(-1, 3), axis=0)
         local_offset = min_vals + (max_vals - min_vals) / 2
         local_scale = max(max_vals - min_vals)
-        pnt_ncs = (surf_pnt_wcs - local_offset[np.newaxis, np.newaxis, :]) / (local_scale * 0.5)
-        surfs_ncs.append(pnt_ncs)
+        pnt_ncs = (face_pnt_wcs - local_offset[np.newaxis, np.newaxis, :]) / (local_scale * 0.5)
+        faces_ncs.append(pnt_ncs)
 
     # Normalize edge
     for edge_pnt in edge_pnts:
@@ -60,12 +60,12 @@ def normalize(surf_pnts, edge_pnts, corner_pnts):
         edges_ncs.append(pnt_ncs)
         assert local_scale != 0, 'scale is zero'
 
-    surfs_wcs = np.stack(surfs_wcs)
-    surfs_ncs = np.stack(surfs_ncs)
+    faces_wcs = np.stack(faces_wcs)
+    faces_ncs = np.stack(faces_ncs)
     edges_wcs = np.stack(edges_wcs)
     edges_ncs = np.stack(edges_ncs)
 
-    return surfs_wcs, edges_wcs, surfs_ncs, edges_ncs, corner_wcs
+    return faces_wcs, edges_wcs, faces_ncs, edges_ncs, corner_wcs
 
 
 def get_bbox(point_cloud):
@@ -174,9 +174,9 @@ def extract_primitive(solid):
     num_faces = len(face_dict)
     edgeFace_IncM = np.stack([x for x in edgeFace_IncM.values()])
     faceEdge_IncM = []
-    for surf_idx in range(num_faces):
-        surf_edges, _ = np.where(edgeFace_IncM == surf_idx)
-        faceEdge_IncM.append(surf_edges)
+    for face_idx in range(num_faces):
+        face_edges, _ = np.where(edgeFace_IncM == face_idx)
+        faceEdge_IncM.append(face_edges)
 
     # Sample uv-grid from surface (32x32)
     graph_face_feat = {}
@@ -299,7 +299,7 @@ def parse_solid(solid):
     face_pnts, edge_pnts, edge_corner_pnts, edgeFace_IncM, faceEdge_IncM = extract_primitive(solid)
 
     # Normalize the CAD model
-    surfs_wcs, edges_wcs, surfs_ncs, edges_ncs, corner_wcs = normalize(face_pnts, edge_pnts, edge_corner_pnts)
+    faces_wcs, edges_wcs, faces_ncs, edges_ncs, corner_wcs = normalize(face_pnts, edge_pnts, edge_corner_pnts)
 
     # Remove duplicate and merge corners
     corner_wcs = np.round(corner_wcs, 4)
@@ -324,11 +324,11 @@ def parse_solid(solid):
     edgeCorner_IncM = np.array(edgeCorner_IncM)
 
     # Surface global bbox
-    surf_bboxes = []
-    for pnts in surfs_wcs:
+    face_bboxes = []
+    for pnts in faces_wcs:
         min_point, max_point = get_bbox(pnts.reshape(-1, 3))
-        surf_bboxes.append(np.concatenate([min_point, max_point]))
-    surf_bboxes = np.vstack(surf_bboxes)
+        face_bboxes.append(np.concatenate([min_point, max_point]))
+    face_bboxes = np.vstack(face_bboxes)
 
     # Edge global bbox
     edge_bboxes = []
@@ -339,15 +339,15 @@ def parse_solid(solid):
 
     # Convert to float32 to save space
     data = {
-        'surf_wcs': surfs_wcs.astype(np.float32),
+        'face_wcs': faces_wcs.astype(np.float32),
         'edge_wcs': edges_wcs.astype(np.float32),
-        'surf_ncs': surfs_ncs.astype(np.float32),
+        'face_ncs': faces_ncs.astype(np.float32),
         'edge_ncs': edges_ncs.astype(np.float32),
         'corner_wcs': corner_wcs.astype(np.float32),
         'edgeFace_adj': edgeFace_IncM,
         'edgeCorner_adj': edgeCorner_IncM,
         'faceEdge_adj': faceEdge_IncM,
-        'surf_bbox_wcs': surf_bboxes.astype(np.float32),
+        'face_bbox_wcs': face_bboxes.astype(np.float32),
         'edge_bbox_wcs': edge_bboxes.astype(np.float32),
         'corner_unique': corner_unique.astype(np.float32),
     }
@@ -355,7 +355,7 @@ def parse_solid(solid):
     return data
 
 
-def count_ff_edges(face_edge):
+def count_fe_topo(face_edge):
     """
     Calculate the number of common edges between two adjacent faces
 
@@ -363,19 +363,19 @@ def count_ff_edges(face_edge):
     - face_edge (list): Face-Edge List
     
     Returns:
-    - ff_edges (numpy.ndarray): Number of common edges between any paired faces
+    - fe_topo (numpy.ndarray): Number of common edges between any paired faces
     """
     num_faces = len(face_edge)
-    ff_edges = np.zeros((num_faces, num_faces), dtype=int)
+    fe_topo = np.zeros((num_faces, num_faces), dtype=int)
     face_edge_sets = [set(fe) for fe in face_edge]
     for i in range(num_faces):
         for j in range(i+1, num_faces):
             common_elements = face_edge_sets[i].intersection(face_edge_sets[j])
             common_count = len(common_elements)
-            ff_edges[i, j] = common_count
-            ff_edges[j, i] = common_count
+            fe_topo[i, j] = common_count
+            fe_topo[j, i] = common_count
 
-    return ff_edges
+    return fe_topo
 
 
 def process(step_folder, print_error=False):
@@ -429,8 +429,8 @@ def process(step_folder, print_error=False):
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
 
-        ff_edges = count_ff_edges(data['faceEdge_adj'])
-        data['ff_edges'] = ff_edges
+        fe_topo = count_fe_topo(data['faceEdge_adj'])
+        data['fe_topo'] = fe_topo
 
         save_path = os.path.join(save_folder, data['uid'] + '.pkl')
         with open(save_path, "wb") as tf:
@@ -466,7 +466,7 @@ if __name__ == '__main__':
         step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
 
     # Process B-reps in parallel
-    process(step_dirs[0])
+    # process(step_dirs[0])
     valid = 0
     convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
     for status in tqdm(convert_iter, total=len(step_dirs)):

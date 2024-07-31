@@ -29,38 +29,6 @@ def scale_surf(bbox, surf, node_mask):   # b*n*6, b*n*p*3, b*n
     return face_wcs
 
 
-def construct_edgeFace_adj(edge_face_topo, node_mask=None):   # b*n*n, b*n
-    edgeFace_adj = []
-
-    # Get the batch size and dimensions
-    b, n, _ = edge_face_topo.shape
-
-    # Create a mask to select the upper triangle without the diagonal
-    triu_mask = torch.triu(torch.ones((n, n), device=node_mask.device), diagonal=1).bool()   # n*n
-
-    # Loop through each batch
-    for m in range(b):
-        # Get the upper triangle elements (excluding the diagonal)
-        edge_counts = edge_face_topo[m][triu_mask]
-
-        # Get the indices of the upper triangle
-        indices = torch.nonzero(triu_mask, as_tuple=False)
-
-        # Apply node_mask if provided
-        if node_mask is not None:
-            valid_nodes = node_mask[m]
-            valid_indices = valid_nodes[indices[edge_counts>0]].all(dim=1)
-            assert valid_indices.all(), f"Invalid edges in batch {m}"
-
-        # Repeat indices based on the edge counts
-        repeated_indices = indices.repeat_interleave(edge_counts, dim=0)
-
-        # Append the edges to the list
-        edgeFace_adj.append(repeated_indices)
-
-    return edgeFace_adj
-
-
 def manual_edgeVertex_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
     assert (edgeFace_adj[:, 0] - edgeFace_adj[:, 1]).abs().max() > 0
 
