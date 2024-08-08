@@ -5,8 +5,8 @@ import numpy as np
 import torch
 import wandb
 from collections import defaultdict
-from datasets import FaceEdgeTopoData, FaceGeomData, EdgeGeomData
-from trainer_gather import FaceEdgeTopoTrainer, FaceGeomTrainer, EdgeGeomTrainer
+from datasets import FaceBboxData, FaceGeomData, VertexGeomData, EdgeGeomData
+from trainer_gather import FaceBboxTrainer, FaceGeomTrainer, VertexGeomTrainer, EdgeGeomTrainer
 from dataFeature import GraphFeatures
 
 
@@ -20,8 +20,8 @@ def get_args_gdm():
                         help='Path to pretrained surface vae weights')
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
-    parser.add_argument("--option", type=str, choices=['feTopo', 'faceGeom', 'edgeGeom'], default='faceGeom',
-                        help="Choose between option [fbTopo, faceGeom, edgeGeom] (default: feTopo)")
+    parser.add_argument("--option", type=str, choices=[
+        'faceBbox', 'faceGeom', 'vertexGeom', 'edgeGeom'], default='faceBbox',)
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
@@ -34,6 +34,8 @@ def get_args_gdm():
     parser.add_argument('--max_face', type=int, default=50, help='maximum number of faces')
     parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
     parser.add_argument('--max_num_edge', type=int, default=100, help='maximum number of edges per brep')
+    parser.add_argument('--max_vertex', type=int, default=100, help='maximum number of vertices per brep')
+    parser.add_argument('--max_vertexFace', type=int, default=5, help='maximum number of faces each vertex')
     parser.add_argument('--threshold', type=float, default=0.05, help='minimum threshold between two faces')
     parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
     parser.add_argument('--z_scaled', type=float, default=1, help='scaled the latent z')
@@ -42,7 +44,7 @@ def get_args_gdm():
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_gdm_faceGeom", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_gdm_faceBbox", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -58,12 +60,15 @@ def compute_dataset_info(args):
     integer_counts = defaultdict(int)
     node_distribution = torch.zeros(args.max_face+1)
     max_num_edge = 0
+    max_vertex = 0
+    max_vertexFace = 0
     for path in datas:
         with open(os.path.join(args.data, path), 'rb') as file:
             data = pickle.load(file)
             fe_topo = data['fe_topo']
             max_num_edge = max(max_num_edge, len(data['edgeFace_adj']))
-
+            max_vertex = max(max_vertex, len(data['corner_unique']))
+            max_vertexFace = max(max_vertexFace, max([len(i) for i in data['vertexFace']]))
             assert np.array_equal(fe_topo, fe_topo.T) and np.all(np.diag(fe_topo) == 0)
 
             unique, counts = np.unique(fe_topo, return_counts=True)
@@ -76,7 +81,10 @@ def compute_dataset_info(args):
 
             if fe_topo.shape[0] <= args.max_face:
                 node_distribution[fe_topo.shape[0]] += 1
+
     args.max_num_edge = max_num_edge
+    args.max_vertex = max_vertex
+    args.max_vertexFace = max_vertexFace
 
     assert min(integer_counts.keys()) == 0
     if args.edge_classes == -1:
@@ -123,16 +131,21 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, args.gpu))
 
     # Initialize dataset loader and trainer
-    if args.option == 'feTopo':
+    if args.option == 'faceBbox':
         dataset_info = compute_dataset_info(args)
-        train_dataset = FaceEdgeTopoData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
-        val_dataset = FaceEdgeTopoData(args.data, args.train_list, validate=True, aug=False, args=args)
-        gdm = FaceEdgeTopoTrainer(args, train_dataset, val_dataset, dataset_info)
+        train_dataset = FaceBboxData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
+        val_dataset = FaceBboxData(args.data, args.train_list, validate=True, aug=False, args=args)
+        gdm = FaceBboxTrainer(args, train_dataset, val_dataset, dataset_info)
     elif args.option == 'faceGeom':
         dataset_info = compute_dataset_info(args)
         train_dataset = FaceGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
         val_dataset = FaceGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
         gdm = FaceGeomTrainer(args, train_dataset, val_dataset, dataset_info)
+    elif args.option == 'vertexGeom':
+        dataset_info = compute_dataset_info(args)
+        train_dataset = VertexGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
+        val_dataset = VertexGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
+        gdm = VertexGeomTrainer(args, train_dataset, val_dataset, dataset_info)
     else:
         assert args.option == 'edgeGeom', 'please choose between surface or edge'
         dataset_info = compute_dataset_info(args)
@@ -144,7 +157,7 @@ def main():
     print('Start training...')
 
     # Initialize wandb
-    os.environ["WANDB_MODE"] = "offline"
+    # os.environ["WANDB_MODE"] = "offline"
     wandb.init(project='BrepGDM', dir=args.save_dir, name=args.env)
 
     # Main training loop

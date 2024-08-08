@@ -1,6 +1,7 @@
 import plotly.offline as pyo
 import plotly.graph_objects as go
 import torch
+import random
 import numpy as np
 
 
@@ -239,6 +240,52 @@ def draw_face_topology(bbox, faces, topology, node_mask):    # n*6, n*p*3, n*n, 
         zaxis=dict(title='Z')
     ))
 
+    pyo.plot(fig)
+
+
+def draw_bbox_point(bbox, points):
+    """
+    Draw bounding boxes and points using Plotly.
+
+    Parameters:
+    bbox (numpy.ndarray): An array of shape (b, 6) representing b bounding boxes.
+                          Each bounding box is defined by two opposite corner points (x_min, y_min, z_min, x_max, y_max, z_max).
+    points (numpy.ndarray): An array of shape (nv, 3) representing nv points in 3D space.
+    """
+    fig = go.Figure()
+
+    # Generate random RGB colors for each bounding box
+    def random_color():
+        return 'rgb({}, {}, {})'.format(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+    # Plot bounding boxes
+    for box in bbox:
+        x_min, y_min, z_min, x_max, y_max, z_max = box
+        color = random_color()
+        # Create the lines for the edges of the box
+        lines = [
+            [[x_min, x_max], [y_min, y_min], [z_min, z_min]], [[x_min, x_max], [y_max, y_max], [z_min, z_min]],
+            [[x_min, x_max], [y_min, y_min], [z_max, z_max]], [[x_min, x_max], [y_max, y_max], [z_max, z_max]],
+            [[x_min, x_min], [y_min, y_max], [z_min, z_min]], [[x_max, x_max], [y_min, y_max], [z_min, z_min]],
+            [[x_min, x_min], [y_min, y_max], [z_max, z_max]], [[x_max, x_max], [y_min, y_max], [z_max, z_max]],
+            [[x_min, x_min], [y_min, y_min], [z_min, z_max]], [[x_max, x_max], [y_min, y_min], [z_min, z_max]],
+            [[x_min, x_min], [y_max, y_max], [z_min, z_max]], [[x_max, x_max], [y_max, y_max], [z_min, z_max]]
+        ]
+        for line in lines:
+            fig.add_trace(go.Scatter3d(x=line[0], y=line[1], z=line[2], mode='lines', line=dict(color=color)))
+
+    # Plot points
+    fig.add_trace(go.Scatter3d(x=points[:, 0], y=points[:, 1], z=points[:, 2], mode='markers',
+                               marker=dict(size=2, color='black')))
+
+    # Set the layout
+    fig.update_layout(scene=dict(
+        xaxis_title='X',
+        yaxis_title='Y',
+        zaxis_title='Z'
+    ))
+
+    # Display the plot
     pyo.plot(fig)
 
 

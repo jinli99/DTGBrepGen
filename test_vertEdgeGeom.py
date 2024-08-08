@@ -6,7 +6,7 @@ import torch
 import pickle
 import numpy as np
 from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransformer, EdgeGeomTransformer,
-                   VertexGeomTransformer, AutoencoderKL1DFastDecode)
+                   VertexGeomTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastDecode)
 from diffusion import GraphDiffusion, DDPM
 from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, ncs2wcs, generate_random_string,
                    remove_box_edge, construct_edgeFace_adj, construct_feTopo, remove_short_edge, reconstruct_vv_adj, construct_vertexFace, construct_faceEdge)
@@ -46,6 +46,7 @@ def main():
         os.makedirs(args.save_folder)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     batch_size = args.batch_size
 
     with open(args.hyper_params_path, "rb") as f:
@@ -67,6 +68,23 @@ def main():
     face_vae.load_state_dict(torch.load(args.face_vae_path), strict=False)     # inputs: points_batch*3*4*4
     face_vae = face_vae.to(device).eval()
 
+    # Load pretrained surface vae (fast encode version)
+    face_vae_encoder = AutoencoderKLFastEncode(in_channels=3,
+                                       out_channels=3,
+                                       down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
+                                                         'DownEncoderBlock2D', 'DownEncoderBlock2D'),
+                                       up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D',
+                                                       'UpDecoderBlock2D'),
+                                       block_out_channels=(128, 256, 512, 512),
+                                       layers_per_block=2,
+                                       act_fn='silu',
+                                       latent_channels=3,
+                                       norm_num_groups=32,
+                                       sample_size=512,
+                                       )
+    face_vae_encoder.load_state_dict(torch.load(args.face_vae_path), strict=False)
+    face_vae_encoder = face_vae_encoder.to(device).eval()
+
     edge_vae = AutoencoderKL1DFastDecode(
         in_channels=3,
         out_channels=3,
@@ -82,23 +100,23 @@ def main():
     edge_vae.load_state_dict(torch.load(args.edge_vae_path), strict=False)     # inputs: points_batch*3*4
     edge_vae = edge_vae.to(device).eval()
 
-    # Initial GraphTransformer and GraphDiffusion
+    # # Initial GraphTransformer and GraphDiffusion
     hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
     hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
-    faceBbox_model = FaceBboxTransformer(n_layers=5, input_dims={'x': 12, 'e': m, 'y': 12},
-                                         hidden_mlp_dims=hidden_mlp_dims,hidden_dims=hidden_dims, output_dims={'x': 6},
-                                         act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    faceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
-    faceBbox_model = faceBbox_model.to(device).eval()
-
-    # Initial FaceGeomTransformer
-    faceGeom_model = FaceGeomTransformer(n_layers=hyper_params['n_layers'], input_dims={'x': 54, 'e': 5, 'y': 12},
-                                         hidden_mlp_dims=hyper_params['hidden_mlp_dims'],
-                                         hidden_dims=hyper_params['hidden_dims'],
-                                         output_dims={'x': 48, 'e': 5, 'y': 0},
-                                         act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
-    faceGeom_model = faceGeom_model.to(device).eval()
+    # faceBbox_model = FaceBboxTransformer(n_layers=5, input_dims={'x': 12, 'e': m, 'y': 12},
+    #                                      hidden_mlp_dims=hidden_mlp_dims,hidden_dims=hidden_dims, output_dims={'x': 6},
+    #                                      act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
+    # faceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
+    # faceBbox_model = faceBbox_model.to(device).eval()
+    #
+    # # Initial FaceGeomTransformer
+    # faceGeom_model = FaceGeomTransformer(n_layers=hyper_params['n_layers'], input_dims={'x': 54, 'e': 5, 'y': 12},
+    #                                      hidden_mlp_dims=hyper_params['hidden_mlp_dims'],
+    #                                      hidden_dims=hyper_params['hidden_dims'],
+    #                                      output_dims={'x': 48, 'e': 5, 'y': 0},
+    #                                      act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
+    # faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
+    # faceGeom_model = faceGeom_model.to(device).eval()
 
     # Initial VertexGeomTransformer
     vertexGeom_model = VertexGeomTransformer(n_layers=5, input_dims={'x': 9, 'y': 12}, hidden_mlp_dims=hidden_mlp_dims,
@@ -122,6 +140,9 @@ def main():
     edgeVertex = []
     edgeFace = []
     vv_list = []
+    face_ncs = []
+    face_bbox = []
+    vertex_geom = []
     with open("data_process/furniture_data_split_6bit.pkl", 'rb') as f:
         train_data = pickle.load(f)['train']
     for i in range(batch_size):
@@ -134,73 +155,26 @@ def main():
                     edgeVertex.append(data['edgeCorner_adj'])     # [ne*2, ...]
                     vv_list.append(data['vv_list'])               # list[(v1, v2, edge_idx), ...]
                     edgeFace.append(torch.from_numpy(data['edgeFace_adj']).to(device))
+                    face_ncs.append(torch.from_numpy(data['face_ncs']).to(device))    # [nf*32*32*3, ...]
+                    face_bbox.append(torch.from_numpy(data['face_bbox_wcs']).to(device))   # [nf*6, ...]
+                    vertex_geom.append(torch.from_numpy(data['corner_unique']).to(device))    # [nv*3,   ]
                     break
-    nf = max([len(i) for i in e])
-    e = [pad_zero(i, max_len=nf, dim=1) for i in e]    # [(nf*nf, nf), ...]
-    node_mask = torch.stack([torch.from_numpy(i[1]) for i in e], dim=0).to(device)     # b*nf
-    e = torch.stack([torch.from_numpy(i[0]) for i in e], dim=0).to(device)             # b*nf*nf
 
-    """****************Face Bbox****************"""
-    x = torch.randn((batch_size, nf, 6), device=device, dtype=torch.float)     # b*nf*6
-    e = torch.nn.functional.one_hot(e, num_classes=m)  # b*nf*nf*m
-    x, e = xe_mask(x=x, e=e, node_mask=node_mask, check_sym=False)
-    e = make_edge_symmetric(e)    # b*n*n*m
-    assert_weak_one_hot(e)
+    face_bbox, node_mask = pad_and_stack(face_bbox)     # b*nf*6, b*nf
+    face_bbox *= hyper_params['bbox_scaled']
+    face_ncs, _ = pad_and_stack(face_ncs)               # b*nf*32*32*3
+    # Pass through surface VAE to sample latent z
+    with torch.no_grad():
+        face_uv = face_ncs.flatten(0, 1).permute(0, 3, 1, 2)
+        face_latent = face_vae_encoder(face_uv)
+        face_latent = face_latent.unflatten(0, (batch_size, -1)).flatten(-2, -1).permute(0, 1, 3, 2)  # b*n*16*3
+    face_bbox_geom = torch.cat((face_latent.flatten(-2, -1), face_bbox), dim=-1)   # b*nf*54
+
+    # vertex_geom, vertex_mask = pad_and_stack(vertex_geom)     # b*nv*3, b*nv
 
     with torch.no_grad():
-        # Extract features
-        feat = extract_feat(e, node_mask)
-        for t in range(ddpm.T-1, -1, -1):
-            x_feat = torch.cat((x, feat[0]), dim=-1).float()  # b*n*12
-            e_feat = torch.cat((e, feat[1]), dim=-1).float()  # b*n*n*m
-            y_feat = torch.cat(
-                (feat[2], torch.tensor([ddpm.normalize_t(t)]*batch_size, device=device).unsqueeze(-1)), dim=-1).float()  # b*12
-
-            # Prediction
-            x_pred = faceBbox_model(x_feat, e_feat, y_feat, node_mask)  # b*n*6
-
-            # Sample x
-            x = ddpm.p_sample(x, x_pred, torch.tensor([t], device=device))  # b*n*6
-
-            # Mask
-            x, _ = xe_mask(x, node_mask=node_mask)   # b*n*6
-
-        x = x / hyper_params['bbox_scaled']
-
-        # Remove faces and edges
-        # edgeFace = construct_edgeFace_adj(torch.argmax(e, -1), node_mask=node_mask)     # list[shape:ne*2,...]
-        temp = [remove_box_edge(x[i][node_mask[i]], edgeFace[i]) for i in range(batch_size)]
-        x = [i[0] for i in temp]   # list[shape:nf*6, ...]
-        edgeFace = [i[1] for i in temp]   # list[shape:ne*2,...]
-
-        """****************Face Geometry****************"""
-        face_bbox, node_mask = pad_and_stack(x)    # b*nf*6, b*nf
-        nf = face_bbox.shape[1]
-        face_bbox *= hyper_params['bbox_scaled']
-        fe_topo = [pad_zero(construct_feTopo(i).cpu().numpy(), max_len=node_mask.shape[1], dim=1)[0] for i in edgeFace]   # list[shape:nf*nf, ...]
-        fe_topo = torch.from_numpy(np.stack(fe_topo)).to(device)    # b*nf*nf
-        x = torch.randn((fe_topo.shape[0], fe_topo.shape[1], 48), device=device)    # b*nf*48
-        e = torch.nn.functional.one_hot(fe_topo, num_classes=m)  # b*n*n*m
-        x, e = xe_mask(x=x, e=e, node_mask=node_mask)    # b*nf*48, b*n*n*m
-        feat = extract_feat(e, node_mask)
-        for t in range(ddpm.T - 1, -1, -1):
-
-            # Extract features
-            x_feat = torch.cat((x, feat[0]), dim=-1).float()  # b*nf*54
-            e_feat = torch.cat((e, feat[1]), dim=-1).float()  # b*nf*nf*m
-            y_feat = torch.cat(
-                (feat[2], torch.tensor([ddpm.normalize_t(t)] * batch_size, device=device).unsqueeze(-1)),
-                dim=-1).float()  # b*12
-
-            # Predict start
-            pred_noise = faceGeom_model(x_feat, e_feat, y_feat, face_bbox, node_mask)  # b*nf*54
-
-            # Sample x
-            x = ddpm.p_sample(x, pred_noise, torch.tensor([t], device=device))   # b*nf*48
-            x, _ = xe_mask(x=x, node_mask=node_mask)    # b*nf*48
 
         """****************Vertex Geometry****************"""
-        face_bbox_geom = torch.cat((x, face_bbox), dim=-1)  # b*nf*54
         vv_adj = [reconstruct_vv_adj(edgeVertex[i].max()+1, np.array(vv_list[i])) for i in range(batch_size)]   # [nv*nv ,...]
         nv = max([len(i) for i in vv_adj])
         vertexFace = [construct_vertexFace(vv_adj[i].shape[0], edgeVertex[i], edgeFace[i].cpu().numpy()) for i in range(batch_size)]    # list[[[face_1, face_2,...], ...],...]

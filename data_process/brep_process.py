@@ -378,6 +378,13 @@ def count_fe_topo(face_edge):
     return fe_topo
 
 
+def construct_vv_list(edgeCorner_adj):
+
+    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeCorner_adj)]
+
+    return vv_list
+
+
 def process(step_folder, print_error=False):
     """
     Helper function to load step files and process in parallel
@@ -431,6 +438,20 @@ def process(step_folder, print_error=False):
 
         fe_topo = count_fe_topo(data['faceEdge_adj'])
         data['fe_topo'] = fe_topo
+
+        vv_list = construct_vv_list(data['edgeCorner_adj'])
+        data['vv_list'] = vv_list
+
+        nv = data['corner_unique'].shape[0]
+        vertex_edge_dict = {i: [] for i in range(nv)}
+        for edge_id, (v1, v2) in enumerate(data['edgeCorner_adj']):
+            vertex_edge_dict[v1].append(edge_id)
+            vertex_edge_dict[v2].append(edge_id)
+
+        vertex_edge = [vertex_edge_dict[i] for i in range(nv)]    # list[[edge_1, edge_2,...],...]
+        # list[[face_1, face_2,...], ...]
+        vertexFace = [np.unique(data['edgeFace_adj'][i].reshape(-1)).tolist() for i in vertex_edge]
+        data['vertexFace'] = vertexFace
 
         save_path = os.path.join(save_folder, data['uid'] + '.pkl')
         with open(save_path, "wb") as tf:

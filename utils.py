@@ -2,18 +2,32 @@ import torch
 import random
 import string
 import numpy as np
+from collections import defaultdict
 
 
-def pad_and_stack(inputs):
+def pad_and_stack(inputs, max_n=None):
+
+    if isinstance(inputs[0], np.ndarray):
+        import_device = 'numpy'
+    elif isinstance(inputs[0], torch.Tensor):
+        import_device = 'tensor'
+    else:
+        raise ValueError("Input should be a list of numpy arrays or torch tensors")
 
     batch_size = len(inputs)
     fixed_shape = list(inputs[0].shape[1:])
 
-    max_n = max(tensor.shape[0] for tensor in inputs)
+    if max_n is None:
+        max_n = max(tensor.shape[0] for tensor in inputs)
 
     padded_shape = [batch_size, max_n] + fixed_shape
-    padded_surfPos = torch.zeros(padded_shape, dtype=inputs[0].dtype, device=inputs[0].device)
-    node_mask = torch.zeros([batch_size, max_n], dtype=torch.bool, device=inputs[0].device)
+
+    if import_device == 'tensor':
+        padded_surfPos = torch.zeros(padded_shape, dtype=inputs[0].dtype, device=inputs[0].device)
+        node_mask = torch.zeros([batch_size, max_n], dtype=torch.bool, device=inputs[0].device)
+    else:
+        padded_surfPos = np.zeros(padded_shape, dtype=inputs[0].dtype)
+        node_mask = np.zeros([batch_size, max_n], dtype=bool)
 
     for i, tensor in enumerate(inputs):
         current_n = tensor.shape[0]
@@ -24,7 +38,7 @@ def pad_and_stack(inputs):
 
 
 def pad_zero(x, max_len, dim=0):
-    """padding for x with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces)"""
+    """padding for x with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces, ...)"""
 
     assert x.shape[0] <= max_len
 
@@ -34,9 +48,12 @@ def pad_zero(x, max_len, dim=0):
         mask = np.zeros(max_len, dtype=np.bool_)
         mask[:x.shape[0]] = True
     elif dim == 1:
-        assert len(x.shape) == 2
-        total = np.zeros((max_len, max_len), dtype=x.dtype)
-        total[:x.shape[0], :x.shape[0]] = x
+        assert x.shape[0] == x.shape[1]
+        if len(x.shape) > 2:
+            total = np.zeros((max_len, max_len, *x.shape[2:]), dtype=x.dtype)
+        else:
+            total = np.zeros((max_len, max_len), dtype=x.dtype)
+        total[:x.shape[0], :x.shape[0], ...] = x
         mask = np.zeros(max_len, dtype=np.bool_)
         mask[:x.shape[0]] = True
     else:
@@ -75,6 +92,41 @@ def construct_edgeFace_adj(edge_face_topo, node_mask=None):   # b*n*n, b*n
         edgeFace_adj.append(repeated_indices)
 
     return edgeFace_adj
+
+
+def construct_faceEdge(edgeFace):
+
+    max_face_id = torch.max(edgeFace).item()
+    faceEdge_dict = defaultdict(list)
+
+    for edge_id, (face1, face2) in enumerate(edgeFace):
+        faceEdge_dict[face1.item()].append(edge_id)
+        faceEdge_dict[face2.item()].append(edge_id)
+
+    faceEdge = [faceEdge_dict[i] for i in range(max_face_id + 1)]
+
+    return faceEdge
+
+
+def reconstruct_vv_adj(n_vertices, vv_list):     # array[[v1, v2, edge_idx], ...]
+    indices = vv_list[:, :2].astype(int)  # ne*2
+    vv_adj = np.zeros((n_vertices, n_vertices), dtype=int)  # nv*nv
+    vv_adj[indices[:, 0], indices[:, 1]] = 1
+    vv_adj[indices[:, 1], indices[:, 0]] = 1  # nv*nv
+
+    return vv_adj
+
+
+def construct_vertexFace(nv, edgeCorner_adj, edgeFace_adj):
+    vertex_edge_dict = {i: [] for i in range(nv)}
+    for edge_id, (v1, v2) in enumerate(edgeCorner_adj):
+        vertex_edge_dict[v1].append(edge_id)
+        vertex_edge_dict[v2].append(edge_id)
+
+    vertex_edge = [vertex_edge_dict[i] for i in range(nv)]  # list[[edge_1, edge_2,...],...]
+    # list[[face_1, face_2,...], ...]
+    vertexFace = [np.unique(edgeFace_adj[i].reshape(-1)).tolist() for i in vertex_edge]
+    return vertexFace
 
 
 def construct_feTopo(edgeFace_adj):    # ne*2
@@ -132,7 +184,7 @@ def calc_bbox_diff(bounding_boxes):
             if inter_vol > 0:
                 vol1 = box_volume(box1)
                 vol2 = box_volume(box2)
-                diff_mat[i, j] = diff_mat[j, i] = - (inter_vol / torch.min(vol1, vol2))
+                diff_mat[i, j] = diff_mat[j, i] = - (inter_vol / torch.max(vol1, vol2))
             else:
                 dist = box_distance(box1, box2)
                 diff_mat[i, j] = diff_mat[j, i] = dist
@@ -153,10 +205,15 @@ def remove_box_edge(box, edgeFace_adj):  # nf*6, ne*2
 
     # Remove close bbox
     remove_box_idx = []
-    true_indices = torch.where(diff_mat < -threshold1)
-    if len(true_indices[0]) > 0:
-        v1, v2 = vol[true_indices[0]], vol[true_indices[1]]
-        remove_box_idx = torch.unique(torch.where(v1 < v2, true_indices[0], true_indices[1])).tolist()
+    # true_indices = torch.where(diff_mat < -threshold1)
+    # if len(true_indices[0]) > 0:
+    #     v1, v2 = vol[true_indices[0]], vol[true_indices[1]]
+    #     remove_box_idx = torch.unique(torch.where(v1 < v2, true_indices[0], true_indices[1])).tolist()
+    #
+    # # Remove the edges of the two boxes that are far apart
+    # threshold2 = 0.4
+    # mask = diff_mat[edgeFace_adj[:, 0], edgeFace_adj[:, 1]] > threshold2  # ne
+    # edgeFace_adj = edgeFace_adj[~mask]
 
     # Remove bbox with no edges
     remove_box_idx += list(set(range(nf)) - set(torch.unique(edgeFace_adj.view(-1)).cpu().numpy().tolist()))
@@ -164,11 +221,7 @@ def remove_box_edge(box, edgeFace_adj):  # nf*6, ne*2
 
     # Update edgeFace_adj
     mask = torch.any(torch.isin(edgeFace_adj, torch.tensor(remove_box_idx, device=edgeFace_adj.device)), dim=1)
-    edgeFace_adj = edgeFace_adj[~mask]
-
-    # Remove the edges of the two boxes that are far apart
-    threshold2 = 0.4
-    mask = diff_mat[edgeFace_adj[:, 0], edgeFace_adj[:, 1]] > threshold2  # ne
+    assert torch.all(~mask)
     edgeFace_adj = edgeFace_adj[~mask]
 
     # Update box

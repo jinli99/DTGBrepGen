@@ -6,7 +6,7 @@ import numpy as np
 import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
-from utils import pad_zero
+from utils import pad_and_stack, pad_zero, reconstruct_vv_adj
 
 
 # furniture class labels
@@ -163,6 +163,12 @@ def load_data(input_data, input_list, validate, args):
     return loaded_data
 
 
+def sort_bbox_multi(bbox):   # n*6
+    bbox = bbox.reshape(-1, 2, 3)   # n*2*3
+    bbox_min, bbox_max = bbox.min(1), bbox.max(1)    # n*3, n*3
+    return np.concatenate((bbox_min, bbox_max), axis=-1)    # n*6
+
+
 class FaceVaeData(torch.utils.data.Dataset):
     """ Face VAE Dataloader """
 
@@ -259,22 +265,20 @@ class EdgeVaeData(torch.utils.data.Dataset):
         return torch.FloatTensor(edge_u)
 
 
-class FaceEdgeTopoData(torch.utils.data.Dataset):
-    """ Face Bounding Box and Edge-Face Topology Dataloader """
+class FaceBboxData(torch.utils.data.Dataset):
+    """ Face Bounding Box Dataloader """
 
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
         self.bbox_scaled = args.bbox_scaled
         self.aug = aug
+        self.data = []
         # Load data
         self.data = load_data(input_data, input_list, validate, args)
-
         # Inflate furniture x50 times for training
         # if len(self.data) < 2000 and not validate:
-        #     self.data = self.data * 3
-
-        print("train" if not validate else "val", len(self.data))
+        #     self.data = self.data * 50
 
     def __len__(self):
         return len(self.data)
@@ -289,10 +293,15 @@ class FaceEdgeTopoData(torch.utils.data.Dataset):
 
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
-        face_bbox, fe_topo = data['face_bbox_wcs'], data['fe_topo']   # num_faces*6, num_faces*num_faces
 
-        # Make bbox range larger
-        face_bbox = face_bbox * self.bbox_scaled
+        fe_topo, face_bbox = (
+            data['fe_topo'],           # nf*nf
+            data['face_bbox_wcs'],     # nf*6
+        )
+
+        # Increase value range
+        face_bbox = sort_bbox_multi(face_bbox)
+        face_bbox = face_bbox * self.bbox_scaled    # nf*6
 
         # Randomly shuffle the sequence
         random_indices = np.random.permutation(face_bbox.shape[0])
@@ -300,22 +309,22 @@ class FaceEdgeTopoData(torch.utils.data.Dataset):
         fe_topo = fe_topo[random_indices, :]
         fe_topo = fe_topo[:, random_indices]
 
-        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face+1, dim=0)  # max_faces*6, max_faces, max_faces
-        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face+1, dim=1)   # max_faces*max_faces
+        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face + 1, dim=0)  # max_faces*6, max_faces
+        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face + 1, dim=1)  # max_faces*max_faces
 
         if data_class is not None:
             return (
-                torch.FloatTensor(face_bbox),   # max_faces*6, max_faces
-                torch.from_numpy(fe_topo),      # max_faces*max_faces
-                torch.from_numpy(mask),         # max_faces
+                torch.FloatTensor(face_bbox),      # max_faces*6
+                torch.from_numpy(fe_topo),        # max_faces*max_faces
+                torch.from_numpy(mask),           # # max_faces
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
-                torch.FloatTensor(face_bbox),
-                torch.from_numpy(fe_topo),
-                torch.from_numpy(mask),  # max_faces
-            )  # abc or deepcad
+                torch.FloatTensor(face_bbox),  # max_faces*6
+                torch.from_numpy(fe_topo),  # max_faces*max_faces
+                torch.from_numpy(mask),  # # max_faces     # uncond deepcad/abc
+            )
 
 
 class FaceGeomData(torch.utils.data.Dataset):
@@ -352,6 +361,7 @@ class FaceGeomData(torch.utils.data.Dataset):
         )
 
         # Increase value range
+        face_bbox = sort_bbox_multi(face_bbox)
         face_bbox = face_bbox * self.bbox_scaled    # nf*6
 
         # Randomly shuffle the sequence
@@ -375,10 +385,103 @@ class FaceGeomData(torch.utils.data.Dataset):
             )
         else:
             return (
-                torch.FloatTensor(face_ncs),  # max_faces*32*32*3
+                torch.FloatTensor(face_ncs),   # max_faces*32*32*3
                 torch.FloatTensor(face_bbox),  # max_faces*6
-                torch.from_numpy(fe_topo),  # max_faces*max_faces
-                torch.from_numpy(mask),  # # max_faces     # uncond deepcad/abc
+                torch.from_numpy(fe_topo),     # max_faces*max_faces
+                torch.from_numpy(mask),        # max_faces     # uncond deepcad/abc
+            )
+
+
+class VertexGeomData(torch.utils.data.Dataset):
+    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+        self.max_face = args.max_face
+        self.max_edge = args.max_edge
+        self.max_vertex = args.max_vertex
+        self.max_vertexFace = args.max_vertexFace
+        self.bbox_scaled = args.bbox_scaled
+        self.aug = aug
+        self.data = []
+        # Load data
+        self.data = load_data(input_data, input_list, validate, args)
+        # Inflate furniture x50 times for training
+        # if len(self.data) < 2000 and not validate:
+        #     self.data = self.data * 50
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        # Load data
+        data_class = None
+        if isinstance(self.data[index], tuple):
+            data_path, data_class = self.data[index]
+        else:
+            data_path = self.data[index]
+
+        with open(data_path, "rb") as tf:
+            data = pickle.load(tf)
+
+        vertex_geom, face_ncs, face_bbox, edgeFace_adj, vv_list, vertexFace = (
+            data['corner_unique'],  # nv*3
+            data['face_ncs'],       # nf*32*32*3
+            data['face_bbox_wcs'],  # nf*6
+            data['edgeFace_adj'],   # ne*2
+            data['vv_list'],        # list[(v1, v2, edge_idx), ...]
+            data['vertexFace']
+        )
+
+        nv = data['corner_unique'].shape[0]
+        assert data['edgeCorner_adj'].max() + 1 == nv
+
+        vv_list = np.array(vv_list)  # ne*3  array[[v1, v2, edge_idx], ...]
+        indices = vv_list[:, :2].astype(int)  # ne*2
+        vv_adj = np.zeros((data['corner_unique'].shape[0], data['corner_unique'].shape[0]), dtype=int)  # nv*nv
+        vv_adj[indices[:, 0], indices[:, 1]] = 1
+        vv_adj[indices[:, 1], indices[:, 0]] = 1    # nv*nv
+
+        # Increase value range
+        face_bbox = sort_bbox_multi(face_bbox)
+        face_bbox = face_bbox * self.bbox_scaled  # nf*6
+        vertex_geom *= self.bbox_scaled           # nv*3
+
+        vertex_faceBbox = [face_bbox[i] for i in vertexFace]   # list[nf*6, ...]
+        vertex_faceGeom = [face_ncs[i] for i in vertexFace]    # list[nf*32*32*3, ...]
+        vertex_faceBbox, vFace_mask = pad_and_stack(vertex_faceBbox, self.max_vertexFace)     # nv*nf*6. nv*nf
+        vertex_faceGeom, _ = pad_and_stack(vertex_faceGeom, self.max_vertexFace)    # nv*nf*32*32*3
+
+        # Randomly shuffle the sequence
+        random_indices = np.random.permutation(vertex_geom.shape[0])
+        vertex_geom = vertex_geom[random_indices]              # nv*3
+        vv_adj = vv_adj[random_indices, :]
+        vv_adj = vv_adj[:, random_indices]                     # nv*nv
+        vertex_faceBbox = vertex_faceBbox[random_indices]      # nv*nf*6
+        vertex_faceGeom = vertex_faceGeom[random_indices]      # nv*nf*32*32*3
+        vFace_mask = vFace_mask[random_indices]                # nv*nf
+
+        vertex_geom, mask = pad_zero(vertex_geom, max_len=self.max_vertex + 1, dim=0)  # max_vertices*3, max_vertices
+        vv_adj, _ = pad_zero(vv_adj, max_len=self.max_vertex + 1, dim=1)
+        vertex_faceBbox, _ = pad_zero(vertex_faceBbox, max_len=self.max_vertex + 1, dim=0)
+        vertex_faceGeom, _ = pad_zero(vertex_faceGeom, max_len=self.max_vertex + 1, dim=0)
+        vFace_mask, _ = pad_zero(vFace_mask, max_len=self.max_vertex + 1, dim=0)
+
+        if data_class is not None:
+            return (
+                torch.FloatTensor(vertex_geom),       # max_vertices*3
+                torch.from_numpy(vv_adj),             # max_vertices*max_vertices
+                torch.FloatTensor(vertex_faceBbox),   # max_vertices*nf*6
+                torch.FloatTensor(vertex_faceGeom),   # max_vertices*nf*32*32*3
+                torch.from_numpy(mask),               # max_vertices
+                torch.from_numpy(vFace_mask),         # max_vertices*nf
+                torch.LongTensor([data_class + 1])    # add 1, class 0 = uncond (furniture)
+            )
+        else:
+            return (
+                torch.FloatTensor(vertex_geom),  # max_vertices*3
+                torch.from_numpy(vv_adj),  # max_vertices*max_vertices
+                torch.FloatTensor(vertex_faceBbox),  # max_vertices*nf*6
+                torch.FloatTensor(vertex_faceGeom),  # max_vertices*nf*32*32*3
+                torch.from_numpy(mask),  # max_vertices
+                torch.from_numpy(vFace_mask),  # max_vertices*nf     # uncond deepcad/abc
             )
 
 
@@ -412,47 +515,49 @@ class EdgeGeomData(torch.utils.data.Dataset):
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
 
-        face_ncs, edge_ncs, edgeFace_adj, face_bbox, edge_bbox = (
+        face_ncs, edge_ncs, edgeFace_adj, face_bbox, vertex_geom, edgeVertex = (
             data['face_ncs'],         # nf*32*32*3
             data['edge_ncs'],         # ne*32*3
             data['edgeFace_adj'],     # ne*2
             data['face_bbox_wcs'],    # nf*6
-            data['edge_bbox_wcs']     # ne*6
+            data['corner_unique'],    # nv*3
+            data['edgeCorner_adj']    # ne*2
         )
 
         # Increase value range
+        face_bbox = sort_bbox_multi(face_bbox)
         face_bbox = face_bbox * self.bbox_scaled    # nf*32*32*3
-        edge_bbox = edge_bbox * self.bbox_scaled    # ne*6
 
-        edge_face_ncs = face_ncs[edgeFace_adj]   # ne*2*32*32*3
+        edge_face_ncs = face_ncs[edgeFace_adj]     # ne*2*32*32*3
         edge_face_bbox = face_bbox[edgeFace_adj]   # ne*2*6
+        edge_vertex = vertex_geom[edgeVertex]      # ne*2*3
 
-        random_indices = np.random.permutation(edge_bbox.shape[0])
-        edge_bbox = edge_bbox[random_indices]
+        random_indices = np.random.permutation(edge_ncs.shape[0])
         edge_face_ncs = edge_face_ncs[random_indices]
         edge_face_bbox = edge_face_bbox[random_indices]
         edge_ncs = edge_ncs[random_indices]    # ne*32*3
+        edge_vertex = edge_vertex[random_indices]    # ne*2*3
 
-        edge_bbox, mask = pad_zero(edge_bbox, max_len=self.max_num_edge+1, dim=0)
-        edge_face_ncs, _ = pad_zero(edge_face_ncs, max_len=self.max_num_edge+1, dim=0)
+        edge_face_ncs, mask = pad_zero(edge_face_ncs, max_len=self.max_num_edge+1, dim=0)
         edge_face_bbox, _ = pad_zero(edge_face_bbox, max_len=self.max_num_edge+1, dim=0)
         edge_ncs, _ = pad_zero(edge_ncs, max_len=self.max_num_edge+1, dim=0)
+        edge_vertex, _ = pad_zero(edge_vertex, max_len=self.max_num_edge+1, dim=0)
 
         if data_class is not None:
             return (
-                torch.FloatTensor(edge_ncs),
-                torch.FloatTensor(edge_bbox),
-                torch.FloatTensor(edge_face_ncs),
-                torch.FloatTensor(edge_face_bbox),
-                torch.from_numpy(mask),  # max_num_edge
+                torch.FloatTensor(edge_ncs),              # ne*32*3
+                torch.FloatTensor(edge_face_ncs),         # ne*2*32*32*3
+                torch.FloatTensor(edge_face_bbox),        # ne*2*6
+                torch.FloatTensor(edge_vertex),           # ne*2*3
+                torch.from_numpy(mask),                   # max_num_edge
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
-                torch.FloatTensor(edge_ncs),
-                torch.FloatTensor(edge_bbox),
-                torch.FloatTensor(edge_face_ncs),
-                torch.FloatTensor(edge_face_bbox),
-                torch.from_numpy(mask),  # max_num_edge
+                torch.FloatTensor(edge_ncs),              # ne*32*3
+                torch.FloatTensor(edge_face_ncs),         # ne*2*32*32*3
+                torch.FloatTensor(edge_face_bbox),        # ne*2*6
+                torch.FloatTensor(edge_vertex),           # ne*2*3
+                torch.from_numpy(mask),                   # max_num_edge
             )
 
