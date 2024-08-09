@@ -11,7 +11,7 @@ python train_gdm.py --data data_process/furniture_parsed \
     --max_face 50 --max_edge 30
 
 python train_gdm.py --data data_process/furniture_parsed \
-    --train_list data_process/furniture_data_split_6bit.pkl --option vertexGeom --gpu 2 3 \
+    --train_list data_process/furniture_data_split_6bit.pkl --option vertexGeom --gpu 2 \
     --env furniture_gdm_vertexGeom --train_epochs 1000 --test_epochs 50 --save_epochs 100 --batch_size 32 \
     --max_face 50 --max_edge 30
 

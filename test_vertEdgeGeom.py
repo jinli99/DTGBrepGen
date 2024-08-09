@@ -30,8 +30,8 @@ def get_args_gdm():
     parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/gdm_faceGeom/epoch_3000.pt')
     parser.add_argument('--vertexGeom_path', type=str, default='checkpoints/furniture/gdm_vertexGeom/epoch_1000.pt')
     parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/gdm_edgeGeom/epoch_1000.pt')
-    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_feTopo/hyper_params.pkl')
-    parser.add_argument('--batch_size', type=int, default=8, help='sample batch size')
+    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_faceBbox/hyper_params.pkl')
+    parser.add_argument('--batch_size', type=int, default=4, help='sample batch size')
     parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
     args = parser.parse_args()
 
@@ -103,20 +103,6 @@ def main():
     # # Initial GraphTransformer and GraphDiffusion
     hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
     hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
-    # faceBbox_model = FaceBboxTransformer(n_layers=5, input_dims={'x': 12, 'e': m, 'y': 12},
-    #                                      hidden_mlp_dims=hidden_mlp_dims,hidden_dims=hidden_dims, output_dims={'x': 6},
-    #                                      act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    # faceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
-    # faceBbox_model = faceBbox_model.to(device).eval()
-    #
-    # # Initial FaceGeomTransformer
-    # faceGeom_model = FaceGeomTransformer(n_layers=hyper_params['n_layers'], input_dims={'x': 54, 'e': 5, 'y': 12},
-    #                                      hidden_mlp_dims=hyper_params['hidden_mlp_dims'],
-    #                                      hidden_dims=hyper_params['hidden_dims'],
-    #                                      output_dims={'x': 48, 'e': 5, 'y': 0},
-    #                                      act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    # faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
-    # faceGeom_model = faceGeom_model.to(device).eval()
 
     # Initial VertexGeomTransformer
     vertexGeom_model = VertexGeomTransformer(n_layers=5, input_dims={'x': 9, 'y': 12}, hidden_mlp_dims=hidden_mlp_dims,
@@ -142,7 +128,7 @@ def main():
     vv_list = []
     face_ncs = []
     face_bbox = []
-    vertex_geom = []
+    vertex_geom_gt = []
     with open("data_process/furniture_data_split_6bit.pkl", 'rb') as f:
         train_data = pickle.load(f)['train']
     for i in range(batch_size):
@@ -157,7 +143,7 @@ def main():
                     edgeFace.append(torch.from_numpy(data['edgeFace_adj']).to(device))
                     face_ncs.append(torch.from_numpy(data['face_ncs']).to(device))    # [nf*32*32*3, ...]
                     face_bbox.append(torch.from_numpy(data['face_bbox_wcs']).to(device))   # [nf*6, ...]
-                    vertex_geom.append(torch.from_numpy(data['corner_unique']).to(device))    # [nv*3,   ]
+                    vertex_geom_gt.append(torch.from_numpy(data['corner_unique']).to(device))    # [nv*3,   ]
                     break
 
     face_bbox, node_mask = pad_and_stack(face_bbox)     # b*nf*6, b*nf
@@ -170,7 +156,7 @@ def main():
         face_latent = face_latent.unflatten(0, (batch_size, -1)).flatten(-2, -1).permute(0, 1, 3, 2)  # b*n*16*3
     face_bbox_geom = torch.cat((face_latent.flatten(-2, -1), face_bbox), dim=-1)   # b*nf*54
 
-    # vertex_geom, vertex_mask = pad_and_stack(vertex_geom)     # b*nv*3, b*nv
+    vertex_geom_gt, _ = pad_and_stack(vertex_geom_gt)  # b*nv*3, b*nv
 
     with torch.no_grad():
 
@@ -209,6 +195,9 @@ def main():
             vertex_geom = ddpm.p_sample(vertex_geom, pred_noise, torch.tensor([t], device=device))   # b*nv*3
             vertex_geom, _ = xe_mask(x=vertex_geom, node_mask=vertex_mask)    # b*nv*3
 
+        vertex_geom /= hyper_params['bbox_scaled']
+        print(vertex_geom.min(), vertex_geom.max())
+
         """****************Edge Geometry****************"""
         edge_faceInfo = [face[adj] for face, adj in zip(face_bbox_geom, edgeFace)]   # list[shape:ne*2*54]
         edge_faceInfo, edge_mask = pad_and_stack(edge_faceInfo)            # b*ne*2*54, b*ne
@@ -219,7 +208,7 @@ def main():
         edge_vertex, assert_mask = pad_and_stack(edge_vertex)     # b*ne*2*3, b*ne
         assert torch.all(assert_mask == edge_mask)
         for t in range(ddpm.T - 1, -1, -1):
-            # self.model(e_t, edge_faceInfo, edge_vertex, edge_mask, t)  # b*ne*12
+
             pred_noise = edgeGeom_model(
                 edge_geom, edge_faceInfo, edge_vertex, edge_mask, torch.tensor(
                     [ddpm.normalize_t(t)]*batch_size, device=device).unsqueeze(-1))   # b*ne*12

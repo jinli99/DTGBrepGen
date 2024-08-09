@@ -30,7 +30,7 @@ def get_args_gdm():
     parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/gdm_faceGeom/epoch_3000.pt')
     parser.add_argument('--vertexGeom_path', type=str, default='checkpoints/furniture/gdm_vertexGeom/epoch_1000.pt')
     parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/gdm_edgeGeom/epoch_1000.pt')
-    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_feTopo/hyper_params.pkl')
+    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_faceBbox/hyper_params.pkl')
     parser.add_argument('--batch_size', type=int, default=8, help='sample batch size')
     parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
     args = parser.parse_args()
@@ -266,7 +266,9 @@ def main():
                 face_ncs = face_vae(
                     face_geom_each.unflatten(-1, torch.Size([16, 3])).permute(0, 2, 1).unflatten(-1, torch.Size([4, 4])))   # nf*3*32*32
                 face_ncs = face_ncs.permute(0, 2, 3, 1)    # nf*32*32*3
-                # face_wcs = ncs2wcs(face_bbox, face_ncs.flatten(1, 2)).unflatten(1, (32, 32))  # nf*32*32*3
+
+                # face_wcs = ncs2wcs(face_bbox_each, face_ncs.flatten(1, 2)).unflatten(1, (32, 32))  # nf*32*32*3
+                # continue
 
                 # Decode edge geometry
                 edge_ncs = edge_vae(

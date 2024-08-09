@@ -1,6 +1,11 @@
+import os.path
+import pickle
+import itertools
 import numpy as np
 import torch
 import pulp
+from tqdm import tqdm
+from multiprocessing.pool import Pool
 from chamferdist import ChamferDistance
 from OCC.Core.TColgp import TColgp_Array2OfPnt
 from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSpline
@@ -12,6 +17,102 @@ from OCC.Core.gp import gp_Pnt
 from OCC.Core.ShapeFix import ShapeFix_Face, ShapeFix_Wire, ShapeFix_Edge
 from OCC.Core.ShapeAnalysis import ShapeAnalysis_Wire
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
+from collections import defaultdict
+
+
+def create_vertex_edge_adjacency(edgeCorner):
+    vertex_edge_dict = defaultdict(list)
+    for edge_id, (v1, v2) in enumerate(edgeCorner):
+        vertex_edge_dict[v1].append(edge_id)
+        vertex_edge_dict[v2].append(edge_id)
+    return vertex_edge_dict
+
+
+def check_loop_edge(path):
+
+    with open(os.path.join('data_process/furniture_parsed', path), 'rb') as tf:
+        data = pickle.load(tf)
+
+    # ne*2, [(edge1, edge2, ...), ...], ne*2
+    edgeFace, faceEdge, edgeCorner = data['edgeFace_adj'], data['faceEdge_adj'], data['edgeCorner_adj']
+
+    vertex_edge_dict = create_vertex_edge_adjacency(edgeCorner)
+
+    """Check Loops"""
+    face_loop = []
+    for edges in faceEdge:
+        visited_edges = set()
+        loops = []
+
+        for start_edge in edges:
+            if start_edge in visited_edges:
+                continue
+
+            loop = []
+            current_edge = start_edge
+            current_vertex = edgeCorner[current_edge][0]
+            while current_edge not in visited_edges:
+                visited_edges.add(current_edge)
+                loop.append(current_edge)
+
+                # find next vertex
+                if edgeCorner[current_edge][0] == current_vertex:
+                    current_vertex = edgeCorner[current_edge][1]
+                else:
+                    current_vertex = edgeCorner[current_edge][0]
+
+                # find next edge
+                for e in vertex_edge_dict[current_vertex]:
+                    if e != current_edge and e in edges:
+                        current_edge = e
+                        break
+
+            loops.append(loop)
+
+        face_loop.append(loops)
+
+    """Check Common Edges"""
+    for face1_edges, face2_edges in itertools.combinations(faceEdge, 2):
+        connected = are_faces_connected(face1_edges, face2_edges, edgeCorner)
+        if not connected:
+            print(path)
+            return 0
+    return 1
+
+
+def are_faces_connected(face1_edges, face2_edges, edgeCorner):
+    # Find common edges between two faces
+    edges = list(set(face1_edges) & set(face2_edges))
+
+    # Check if the common edges are connected
+    if len(edges) < 2:
+        return True
+
+    # Create a map of edge to its vertices
+    edge_vertices = {edge: set(edgeCorner[edge]) for edge in edges}
+
+    # Start from the first edge
+    current_edge = edges[0]
+    current_vertices = edge_vertices[current_edge]
+    connected_edges = set()
+    connected_edges.add(current_edge)
+
+    while len(connected_edges) < len(edges):
+        found_next_edge = False
+
+        for edge in edges:
+            if edge in connected_edges:
+                continue
+            if not current_vertices.isdisjoint(edge_vertices[edge]):
+                connected_edges.add(edge)
+                current_vertices = current_vertices.union(edge_vertices[edge])
+                found_next_edge = True
+                break
+
+        if not found_next_edge:
+            return False
+
+    return True
 
 
 def scale_surf(bbox, surf, node_mask):   # b*n*6, b*n*p*3, b*n
@@ -574,3 +675,21 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     solid = maker.Solid()
 
     return solid
+
+
+def main():
+    # with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
+    #     files = pickle.load(tf)['train']
+    #
+    # convert_iter = Pool(os.cpu_count()).imap(check_loop_edge, files)
+    # valid = 0
+    # for status in tqdm(convert_iter, total=len(files)):
+    #     valid += status
+    #
+    # print(valid)
+
+    check_loop_edge('table/partstudio_2060.pkl')
+
+
+if __name__ == '__main__':
+    main()

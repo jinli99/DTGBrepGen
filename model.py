@@ -1607,71 +1607,6 @@ class FaceGeomTransformer(nn.Module):
         return x
 
 
-# class VertexGeomTransformer(nn.Module):
-#     """
-#     n_layers : int -- number of layers
-#     dims : dict -- contains dimensions for each feature type
-#     """
-#     def __init__(self, n_layers: int, input_dims: dict, hidden_mlp_dims: dict, hidden_dims: dict,
-#                  output_dims: dict, act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU()):
-#         super().__init__()
-#         self.n_layers = n_layers
-#         self.out_dim_X = output_dims['x']
-#
-#         self.mlp_in_X = nn.Sequential(nn.Linear(input_dims['x'], hidden_mlp_dims['x']), act_fn_in,
-#                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
-#
-#         self.mlp_in_adj = nn.Sequential(nn.Linear(2, hidden_dims['de']), act_fn_in)
-#         self.mlp_in_edgeInfo = nn.Sequential(nn.Linear(54, hidden_mlp_dims['e']), act_fn_in,
-#                                              nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
-#
-#         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
-#                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
-#
-#         self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
-#                                                                  de=hidden_dims['de'],
-#                                                                  dy=hidden_dims['dy'],
-#                                                                  n_head=hidden_dims['n_head'],
-#                                                                  dim_ffX=hidden_dims['dim_ffX'],
-#                                                                  dim_ffE=hidden_dims['dim_ffE'])
-#                                         for i in range(n_layers)])
-#
-#         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
-#                                        nn.Linear(hidden_mlp_dims['x'], output_dims['x']))
-#
-#         # FiLM E to X
-#         self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
-#         self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
-#
-#         # FiLM y to X
-#         self.y_x_mul = Linear(hidden_dims['dy'], hidden_dims['dx'])
-#         self.y_x_add = Linear(hidden_dims['dy'], hidden_dims['dx'])
-#
-#     def forward(self, x, vv_adj, vertex_edgeInfo, y, node_mask):    # b*nv*9, b*nv*nv*2, b*nv*nv*2*54, b*12, b*nv
-#
-#         X_to_out = x[..., :self.out_dim_X]
-#         new_vv_adj = self.mlp_in_adj(vv_adj)   # b*nv*nv*64
-#         new_vertex_edgeInfo = self.mlp_in_edgeInfo(vertex_edgeInfo).sum(-1)   # b*nv*nv*64
-#         new_E = new_vv_adj + new_vertex_edgeInfo     # b*nv*nv*64
-#         new_E = (new_E + new_E.transpose(1, 2)) / 2
-#         x, e = xe_mask(x=self.mlp_in_X(x), e=new_E, node_mask=node_mask)
-#         y = self.mlp_in_y(y)
-#
-#         e_add = self.e_add(e)
-#         e_mul = self.e_mul(e)
-#         y_x_add = self.y_x_add(y)
-#         y_x_mul = self.y_x_mul(y)
-#         for layer in self.tf_layers:
-#             x = layer(x, e_add, e_mul, y_x_add, y_x_mul, node_mask)
-#
-#         x = self.mlp_out_X(x)
-#         x = (x + X_to_out)
-#
-#         x, _ = xe_mask(x=x, node_mask=node_mask)
-#
-#         return x
-
-
 class VertexGeomTransformer(nn.Module):
     """
     n_layers : int -- number of layers
@@ -1687,8 +1622,9 @@ class VertexGeomTransformer(nn.Module):
                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
 
         self.mlp_in_E = nn.Sequential(nn.Linear(2, hidden_dims['de']), act_fn_in)
-        self.mlp_in_faceInfo = nn.Sequential(nn.Linear(54, hidden_mlp_dims['x']), act_fn_in,
-                                             nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+
+        self.mlp_in_faceInfo = nn.Sequential(nn.Linear(54, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
+                                             nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
 
         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
@@ -1719,13 +1655,9 @@ class VertexGeomTransformer(nn.Module):
         new_E = self.mlp_in_E(e)
         new_E = (new_E + new_E.transpose(1, 2)) / 2
 
-        vertex_faceInfo_embed = (self.mlp_in_faceInfo(
-            vertex_faceInfo) * vFace_mask.unsqueeze(-1)).sum(-2)   # b*nv*256
-        vFace_mask = (vFace_mask.sum(-1, keepdim=True)).expand(-1, -1, vertex_faceInfo_embed.shape[-1])     # b*nv*256
-        vertex_faceInfo_embed = torch.where(vFace_mask != 0, vertex_faceInfo_embed / vFace_mask,
-                                            torch.zeros_like(vertex_faceInfo_embed))     # b*nv*256
+        vertex_faceInfo_embed = self.mlp_in_faceInfo(vertex_faceInfo).mean(-2)   # b*nv*256
 
-        x, e = xe_mask(x=self.mlp_in_X(x) + vertex_faceInfo_embed, e=new_E, node_mask=node_mask)
+        x, e = xe_mask(x=self.mlp_in_X(x)+vertex_faceInfo_embed, e=new_E, node_mask=node_mask)
         y = self.mlp_in_y(y)
 
         e_add = self.e_add(e)

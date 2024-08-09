@@ -401,7 +401,7 @@ class FaceBboxTrainer:
 
             # logging
             if self.iters % 20 == 0:
-                wandb.log({"Face MSE Loss": face_mse_loss}, step=self.iters)
+                wandb.log({"Loss-noise": face_mse_loss}, step=self.iters)
 
             self.iters += 1
             progress_bar.update(1)

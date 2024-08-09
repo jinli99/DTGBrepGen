@@ -30,7 +30,7 @@ def get_args_gdm():
     parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/gdm_faceGeom/epoch_3000.pt')
     parser.add_argument('--vertexGeom_path', type=str, default='checkpoints/furniture/gdm_vertexGeom/epoch_1000.pt')
     parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/gdm_edgeGeom/epoch_1000.pt')
-    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_feTopo/hyper_params.pkl')
+    parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_faceBbox/hyper_params.pkl')
     parser.add_argument('--batch_size', type=int, default=8, help='sample batch size')
     parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
     args = parser.parse_args()
@@ -102,27 +102,6 @@ def main():
     # Initial GraphTransformer and GraphDiffusion
     hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
     hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
-    faceBbox_model = FaceBboxTransformer(n_layers=5, input_dims={'x': 12, 'e': m, 'y': 12},
-                                         hidden_mlp_dims=hidden_mlp_dims,hidden_dims=hidden_dims, output_dims={'x': 6},
-                                         act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    faceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
-    faceBbox_model = faceBbox_model.to(device).eval()
-
-    # Initial FaceGeomTransformer
-    faceGeom_model = FaceGeomTransformer(n_layers=hyper_params['n_layers'], input_dims={'x': 54, 'e': 5, 'y': 12},
-                                         hidden_mlp_dims=hyper_params['hidden_mlp_dims'],
-                                         hidden_dims=hyper_params['hidden_dims'],
-                                         output_dims={'x': 48, 'e': 5, 'y': 0},
-                                         act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
-    faceGeom_model = faceGeom_model.to(device).eval()
-
-    # Initial VertexGeomTransformer
-    vertexGeom_model = VertexGeomTransformer(n_layers=5, input_dims={'x': 9, 'y': 12}, hidden_mlp_dims=hidden_mlp_dims,
-                                             hidden_dims=hidden_dims, output_dims={'x': 3},
-                                             act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
-    vertexGeom_model.load_state_dict(torch.load(args.vertexGeom_path))
-    vertexGeom_model = vertexGeom_model.to(device).eval()
 
     # Initial EdgeGeomTransformer
     edgeGeom_model = EdgeGeomTransformer(n_layers=6, face_geom_dim=48, edge_geom_dim=12)

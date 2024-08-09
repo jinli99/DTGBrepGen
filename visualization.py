@@ -385,3 +385,32 @@ def draw_edge(edge_wcs):
 
     fig = go.Figure(data=data, layout=layout)
     pyo.plot(fig)
+
+
+def draw_points(points):
+
+    colors = np.random.rand(points.shape[0], 3)
+
+    scatter = go.Scatter3d(
+        x=points[:, 0],
+        y=points[:, 1],
+        z=points[:, 2],
+        mode='markers',
+        marker=dict(
+            size=5,
+            color=['rgb({},{},{})'.format(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)) for c in colors]
+        )
+    )
+
+    fig = go.Figure(data=[scatter])
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X Axis',
+            yaxis_title='Y Axis',
+            zaxis_title='Z Axis'
+        ),
+        title="3D Scatter Plot"
+    )
+
+    pyo.plot(fig)
