@@ -4,6 +4,7 @@ import itertools
 import numpy as np
 import torch
 import pulp
+import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
 from chamferdist import ChamferDistance
@@ -69,7 +70,11 @@ def check_loop_edge(path):
 
             loops.append(loop)
 
+        if len(loops) > 1:
+            print(loops)
         face_loop.append(loops)
+
+
 
     """Check Common Edges"""
     for face1_edges, face2_edges in itertools.combinations(faceEdge, 2):
@@ -78,6 +83,44 @@ def check_loop_edge(path):
             print(path)
             return 0
     return 1
+
+
+class BrepTopology:
+    def __init__(self, edgeFace_adj, faceEdge_adj):
+        self.edgeFace_adj = edgeFace_adj
+        self.faceEdge_adj = faceEdge_adj
+
+    def opposite_face(self, edge_id, face_id):
+        faces = self.edgeFace_adj[edge_id]
+        return faces[0] if faces[1] == face_id else faces[1]
+
+
+def edge_choice(edge_id, condition, edges):
+
+    return random.sample(edges, len(edges))
+
+
+def construct_topology(brepTopo: BrepTopology):   # ne*2, [[e1, e2, ...], ...]
+
+    edgeFace_adj = brepTopo.edgeFace_adj.tolist()
+    faceEdge_adj = brepTopo.faceEdge_adj
+    handled_faces = {}
+
+    # for face_id, edges in enumerate(faceEdge_adj):
+    #     start_edge = None
+    #     edge_order = []
+    #     edge_loop = []
+    #
+    #     edge = edges[0]
+    #     while True:
+    #         if start_edge is None:
+    #             start_edge = edge
+    #             edge_loop.append(edge)
+    #
+    #         if brepTopo.opposite_face(edge, face_id) not in handled_faces:
+    #             edge_sort = edges[i+1:]
+    #             edge_sort = edge_choice(edge, edge_sort.append(-1) if len(edge_loop) > 1 else edge_order, edges)
+    #             for next_edge in edge_sort:
 
 
 def are_faces_connected(face1_edges, face2_edges, edgeCorner):
@@ -130,7 +173,7 @@ def scale_surf(bbox, surf, node_mask):   # b*n*6, b*n*p*3, b*n
     return face_wcs
 
 
-def manual_edgeVertex_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
+def manual_edgeVert_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
     assert (edgeFace_adj[:, 0] - edgeFace_adj[:, 1]).abs().max() > 0
 
     edge_start_end = edge_pnts[:, [0, -1], :]   # ne*2*3
@@ -212,7 +255,7 @@ def manual_edgeVertex_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
     return True, torch.tensor(unique_vertex_pnt), edgeVertex_adj
 
 
-def optimize_edgeVertex_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
+def optimize_edgeVert_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
 
     assert (edgeFace_adj[:, 0] - edgeFace_adj[:, 1]).abs().min() > 0
 
@@ -678,9 +721,9 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 
 
 def main():
-    # with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
-    #     files = pickle.load(tf)['train']
-    #
+    with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
+        files = pickle.load(tf)['train']
+
     # convert_iter = Pool(os.cpu_count()).imap(check_loop_edge, files)
     # valid = 0
     # for status in tqdm(convert_iter, total=len(files)):
@@ -688,7 +731,8 @@ def main():
     #
     # print(valid)
 
-    check_loop_edge('table/partstudio_2060.pkl')
+    for file in files:
+        check_loop_edge(file)
 
 
 if __name__ == '__main__':

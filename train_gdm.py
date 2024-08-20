@@ -5,8 +5,8 @@ import numpy as np
 import torch
 import wandb
 from collections import defaultdict
-from datasets import FaceBboxData, FaceGeomData, VertexGeomData, EdgeGeomData
-from trainer_gather import FaceBboxTrainer, FaceGeomTrainer, VertexGeomTrainer, EdgeGeomTrainer
+from datasets import FaceBboxData, FaceGeomData, VertGeomData, EdgeGeomData
+from trainer_gather import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
 from dataFeature import GraphFeatures
 
 
@@ -21,14 +21,14 @@ def get_args_gdm():
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertexGeom', 'edgeGeom'], default='faceBbox',)
+        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='edgeGeom',)
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=4, help='input batch size')
     parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
-    parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
+    parser.add_argument('--test_epochs', type=int, default=1, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
     parser.add_argument('--timesteps', type=int, default=500, help='diffusion timesteps')
     parser.add_argument('--max_face', type=int, default=50, help='maximum number of faces')
@@ -44,7 +44,7 @@ def get_args_gdm():
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_gdm_faceBbox", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_gdm_edgeGeom", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -141,11 +141,11 @@ def main():
         train_dataset = FaceGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
         val_dataset = FaceGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
         gdm = FaceGeomTrainer(args, train_dataset, val_dataset, dataset_info)
-    elif args.option == 'vertexGeom':
+    elif args.option == 'vertGeom':
         dataset_info = compute_dataset_info(args)
-        train_dataset = VertexGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
-        val_dataset = VertexGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
-        gdm = VertexGeomTrainer(args, train_dataset, val_dataset, dataset_info)
+        train_dataset = VertGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
+        val_dataset = VertGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
+        gdm = VertGeomTrainer(args, train_dataset, val_dataset, dataset_info)
     else:
         assert args.option == 'edgeGeom', 'please choose between surface or edge'
         dataset_info = compute_dataset_info(args)

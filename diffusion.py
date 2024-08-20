@@ -48,9 +48,9 @@ class DDPM(nn.Module):
     def normalize_t(self, t):
         return t/self.T
 
-    def add_noise(self, x_0, mask=None, t=None, noise=None):    # b*n*d, b*n
+    def add_noise(self, x_0, mask=None, t=None, noise=None):    # b*n*d1*..., b*n
 
-        assert len(x_0.shape) == 3
+        # assert len(x_0.shape) == 3
 
         if t is None:
             t = torch.randint(0, self.T, size=(x_0.size(0), 1), device=x_0.device)   # b*1
@@ -58,11 +58,11 @@ class DDPM(nn.Module):
         # apply noise to face features
         if noise is None:
             noise = torch.randn_like(x_0)
-        alpha_t_bar = self.alphas_bar[t].view(-1, 1, 1)
+        alpha_t_bar = self.alphas_bar[t].view(-1, *[1] * len(x_0.shape[1:]))
         x_t = torch.sqrt(alpha_t_bar) * x_0 + torch.sqrt(1 - alpha_t_bar) * noise
 
         if mask is not None:
-            x_t = x_t * mask.unsqueeze(-1)  # b*n*d
+            x_t = x_t * (mask.view(*mask.shape[:2], *[1] * len(x_0.shape[2:])))  # b*n*d
 
         return {'x_t': x_t, 'noise': noise, 't': t}
 

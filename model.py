@@ -1554,6 +1554,9 @@ class FaceGeomTransformer(nn.Module):
         self.mlp_in_E = nn.Sequential(nn.Linear(input_dims['e'], hidden_mlp_dims['e']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
 
+        self.mlp_in_vertexInfo = nn.Sequential(nn.Linear(3, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
+                                               nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
+
         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
 
@@ -1583,13 +1586,14 @@ class FaceGeomTransformer(nn.Module):
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
         )
 
-    def forward(self, x, e, y, face_bbox, node_mask):
+    def forward(self, x, e, y, face_bbox, fv_geom, fv_mask, node_mask):    # b*nf*54, b*nf*nf*m, b*12, b*nf*6, b*nf*fv*3, b*nf*fv, b*nf
 
         X_to_out = x[..., :self.out_dim_X]
 
         new_E = self.mlp_in_E(e)
         new_E = (new_E + new_E.transpose(1, 2)) / 2
-        x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox), e=new_E, node_mask=node_mask)
+        fv_info_embed = self.mlp_in_vertexInfo(fv_geom).mean(-2)     # b*nf*256
+        x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox)+fv_info_embed, e=new_E, node_mask=node_mask)
         y = self.mlp_in_y(y)
 
         e_add = self.e_add(e)
@@ -1607,7 +1611,7 @@ class FaceGeomTransformer(nn.Module):
         return x
 
 
-class VertexGeomTransformer(nn.Module):
+class VertGeomTransformer(nn.Module):
     """
     n_layers : int -- number of layers
     dims : dict -- contains dimensions for each feature type
@@ -1623,7 +1627,7 @@ class VertexGeomTransformer(nn.Module):
 
         self.mlp_in_E = nn.Sequential(nn.Linear(2, hidden_dims['de']), act_fn_in)
 
-        self.mlp_in_faceInfo = nn.Sequential(nn.Linear(54, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
+        self.mlp_in_faceInfo = nn.Sequential(nn.Linear(6, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
                                              nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
 
         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,

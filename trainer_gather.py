@@ -6,7 +6,7 @@ import torch.nn as nn
 import pickle
 from diffusers import AutoencoderKL
 from model import (AutoencoderKL1D, FaceBboxTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastEncode,
-                   FaceGeomTransformer, VertexGeomTransformer, EdgeGeomTransformer)
+                   FaceGeomTransformer, VertGeomTransformer, EdgeGeomTransformer)
 from diffusion import GraphDiffusion, DDPM
 from utils import edge_reshape_mask, assert_weak_one_hot, xe_mask
 from dataFeature import GraphFeatures
@@ -299,7 +299,7 @@ class FaceBboxTrainer:
         self.edge_classes = args.edge_classes
 
         # Initialize network
-        n_layers = 5
+        n_layers = 8
         hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
         # The dimensions should satisfy dx % n_head == 0
         hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
@@ -512,7 +512,7 @@ class FaceGeomTrainer:
         self.face_vae = face_vae.to(self.device).eval()
 
         # Initialize network
-        n_layers = 5
+        n_layers = 8
         hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
         # The dimensions should satisfy dx % n_head == 0
         hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
@@ -566,15 +566,19 @@ class FaceGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    face_ncs, face_bbox, fe_topo, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*n, b*1
+                    # b*nf*32*32*3, b*nf*6, b*nf*nf, b*nf*fv*3, b*nf*fv, b*1
+                    face_ncs, face_bbox, fe_topo, faceVert_geom, faceVert_mask, face_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, fe_topo, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
+                    face_ncs, face_bbox, fe_topo, faceVert_geom, faceVert_mask, face_mask = data
                     class_label = None
-                num_faces = torch.nonzero(node_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                face_ncs = face_ncs[:, :num_faces, ...]        # b*n*32*32*3
-                face_bbox = face_bbox[:, :num_faces, :]        # b*n*6
-                fe_topo = fe_topo[:, :num_faces, :num_faces]   # b*n*n
-                node_mask = node_mask[:, :num_faces]           # b*n
+                nf = torch.nonzero(face_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                fv = torch.nonzero(faceVert_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
+                face_ncs = face_ncs[:, :nf, ...]        # b*nf*32*32*3
+                face_bbox = face_bbox[:, :nf, :]        # b*nf*6
+                fe_topo = fe_topo[:, :nf, :nf]          # b*nf*nf
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]     # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, :fv]          # b*nf*fv
+                face_mask = face_mask[:, :nf]           # b*nf
                 e_0 = torch.nn.functional.one_hot(fe_topo, num_classes=self.edge_classes)   # b*n*n*m
                 bsz = face_bbox.shape[0]
 
@@ -593,24 +597,24 @@ class FaceGeomTrainer:
                     face_latent = self.face_vae(face_uv)
                     face_latent = face_latent.unflatten(0, (bsz, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*n*16*3
 
-                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z  # b*n*48
-                x_0, e_0 = xe_mask(x=x_0, e=e_0, node_mask=node_mask)
+                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*n*48
+                x_0, e_0 = xe_mask(x=x_0, e=e_0, node_mask=face_mask)
 
                 self.optimizer.zero_grad()  # zero gradient
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, node_mask)
+                noise_data = self.diffusion.add_noise(x_0, face_mask)
                 x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*n*48, b*1
 
                 # Extract features
                 with torch.cuda.amp.autocast(enabled=False):
-                    feat = self.extract_feat(e_0, node_mask)
+                    feat = self.extract_feat(e_0, face_mask)
                 x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()   # b*n*54
                 e_t_feat = torch.cat((e_0, feat[1]), dim=-1).float()   # b*n*n*m
                 y_feat = torch.cat((feat[2], y), dim=-1).float()       # b*12
 
                 # Predict start
-                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, node_mask)   # b*n*54
+                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, faceVert_geom, faceVert_mask, face_mask)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -618,7 +622,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[node_mask], noise_data['noise'][node_mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
 
                 # Update model
                 self.scaler.scale(face_mse_loss).backward()
@@ -652,17 +656,20 @@ class FaceGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    face_ncs, face_bbox, fe_topo, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*1, b*1
+                    # b*nf*32*32*3, b*nf*6, b*nf*nf, b*nf*fv*3, b*nf*fv, b*1
+                    face_ncs, face_bbox, fe_topo, faceVert_geom, faceVert_mask, face_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, fe_topo, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
+                    face_ncs, face_bbox, fe_topo, faceVert_geom, faceVert_mask, face_mask = data
                     class_label = None
-                num_faces = torch.nonzero(node_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                face_ncs = face_ncs[:, :num_faces, ...]        # b*n*32*32*3
-                face_bbox = face_bbox[:, :num_faces, :]        # b*n*6
-                fe_topo = fe_topo[:, :num_faces, :num_faces]   # b*n*n
-                node_mask = node_mask[:, :num_faces]           # b*n
+                nf = torch.nonzero(face_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                fv = torch.nonzero(faceVert_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
+                face_ncs = face_ncs[:, :nf, ...]        # b*nf*32*32*3
+                face_bbox = face_bbox[:, :nf, :]        # b*nf*6
+                fe_topo = fe_topo[:, :nf, :nf]          # b*nf*nf
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]     # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, :fv]          # b*nf*fv
+                face_mask = face_mask[:, :nf]           # b*nf
                 e_0 = torch.nn.functional.one_hot(fe_topo, num_classes=self.edge_classes)   # b*n*n*m
-                _, e_0 = xe_mask(e=e_0, node_mask=node_mask)
                 bsz = face_bbox.shape[0]
 
                 # Pass through surface VAE to sample latent z
@@ -679,17 +686,17 @@ class FaceGeomTrainer:
                 timesteps = torch.randint(step - 1, step, (bsz, 1), device=self.device).long()  # [batch, 1]
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, node_mask, t=timesteps)
+                noise_data = self.diffusion.add_noise(x_0, face_mask, t=timesteps)
                 x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*n*48, b*1
 
                 # Extract features
-                feat = self.extract_feat(e_0, node_mask)
+                feat = self.extract_feat(e_0, face_mask)
                 x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()   # b*n*54
                 e_t_feat = torch.cat((e_0, feat[1]), dim=-1).float()   # b*n*n*m
                 y_feat = torch.cat((feat[2], y), dim=-1).float()       # b*12
 
                 # Predict start
-                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, node_mask)   # b*n*54
+                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, faceVert_geom, faceVert_mask, face_mask)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -697,7 +704,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[node_mask], noise_data['noise'][node_mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
 
                 total_loss[idx] += face_mse_loss
 
@@ -714,7 +721,7 @@ class FaceGeomTrainer:
         return
 
 
-class VertexGeomTrainer:
+class VertGeomTrainer:
     def __init__(self, args, train_dataset, val_dataset, dataset_info):
         # Initialize model and load to gpu
         self.iters = 0
@@ -746,14 +753,14 @@ class VertexGeomTrainer:
         self.face_vae = face_vae.to(self.device).eval()
 
         # Initialize network
-        n_layers = 5
+        n_layers = 8
         hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
         # The dimensions should satisfy dx % n_head == 0
         hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
         input_dims, output_dims = dataset_info['input_dims'], dataset_info['output_dims']
         input_dims['x'] += 3
         output_dims['x'] += 3
-        model = VertexGeomTransformer(n_layers=n_layers, input_dims=input_dims, hidden_mlp_dims=hidden_mlp_dims,
+        model = VertGeomTransformer(n_layers=n_layers, input_dims=input_dims, hidden_mlp_dims=hidden_mlp_dims,
                                       hidden_dims=hidden_dims, output_dims=output_dims,
                                       act_fn_in=nn.ReLU(), act_fn_out=nn.ReLU())
         model = nn.DataParallel(model)    # distributed training
@@ -794,22 +801,21 @@ class VertexGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv*nf*32*32*3, b*nv, b*nv*nf, b*1
-                    vertex_geom, vv_adj, vertex_faceBbox, vertex_faceGeom, vertex_mask, vFace_mask, class_label = data
+                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv, b*nv*nf, b*1
+                    vert_geom, vv_adj, vertFace_bbox, vert_mask, vertFace_mask, class_label = data
                 else:
-                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv*nf*32*32*3, b*nv, b*nv*nf, b*1
-                    vertex_geom, vv_adj, vertex_faceBbox, vertex_faceGeom, vertex_mask, vFace_mask = data
+                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv, b*nv*nf, b*1
+                    vert_geom, vv_adj, vertFace_bbox, vert_mask, vertFace_mask = data
                     class_label = None
-                nv = torch.nonzero(vertex_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                vf = torch.nonzero(vFace_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                vertex_geom = vertex_geom[:, :nv, ...]                # b*nv*3
+                nv = torch.nonzero(vert_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                vf = torch.nonzero(vertFace_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                vert_geom = vert_geom[:, :nv, ...]                # b*nv*3
                 vv_adj = vv_adj[:, :nv, :nv]                          # b*nv*nv
-                vertex_faceBbox = vertex_faceBbox[:, :nv, :vf, ...]   # b*nv*vf*6
-                vertex_faceGeom = vertex_faceGeom[:, :nv, :vf, ...]   # b*nv*vf*32*32*3
-                vertex_mask = vertex_mask[:, :nv]                     # b*nv
-                vFace_mask = vFace_mask[:, :nv, :vf]                  # b*nv*vf
+                vertFace_bbox = vertFace_bbox[:, :nv, :vf, ...]   # b*nv*vf*6
+                vert_mask = vert_mask[:, :nv]                     # b*nv
+                vertFace_mask = vertFace_mask[:, :nv, :vf]                  # b*nv*vf
                 vv_adj = torch.nn.functional.one_hot(vv_adj, num_classes=2)   # b*nv*nv*2
-                b = vertex_geom.shape[0]
+                b = vert_geom.shape[0]
 
                 # # Augment the surface position (see https://arxiv.org/abs/2106.15282)
                 # conditions = [surfPos]
@@ -820,32 +826,25 @@ class VertexGeomTrainer:
                 #     aug_data.append(self.noise_scheduler.add_noise(data, aug_noise, aug_timesteps))
                 # surfPos = aug_data[0]
 
-                # Pass through surface VAE to sample latent z
-                with torch.no_grad():
-                    face_uv = torch.flatten(vertex_faceGeom, start_dim=0, end_dim=2).permute(0, 3, 1, 2)
-                    face_latent = self.face_vae(face_uv)    # ?*3*4*4
-                    face_latent = face_latent.unflatten(0, (b, nv, vf)).flatten(-2, -1).permute(0, 1, 2, 4, 3)   # b*nv*nf*16*3
-
-                # rescaled the latent z,  b*nv*nf*54
-                vertex_faceInfo = torch.cat(
-                    (face_latent.flatten(-2, -1) * self.z_scaled, vertex_faceBbox), dim=-1).clone().detach()
-                x_0, e_0 = xe_mask(x=vertex_geom, e=vv_adj, node_mask=vertex_mask)    # b*nv*3, b*nv*nv*2
+                # rescaled the latent z,  b*nv*nf*6
+                vertFace_info = vertFace_bbox.clone().detach()
+                x_0, e_0 = xe_mask(x=vert_geom, e=vv_adj, node_mask=vert_mask)    # b*nv*3, b*nv*nv*2
 
                 self.optimizer.zero_grad()  # zero gradient
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, vertex_mask)
+                noise_data = self.diffusion.add_noise(x_0, vert_mask)
                 x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nv*3, b*1
 
                 # Extract features
                 with torch.cuda.amp.autocast(enabled=False):
-                    feat = self.extract_feat(e_0, vertex_mask)
+                    feat = self.extract_feat(e_0, vert_mask)
                 x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()   # b*n*9
                 e_t_feat = torch.cat((e_0, feat[1]), dim=-1).float()   # b*n*n*2
                 y_feat = torch.cat((feat[2], y), dim=-1).float()       # b*12
 
                 # Predict start
-                pred_noise = self.model(x_t_feat, e_t_feat, vertex_faceInfo, y_feat, vertex_mask, vFace_mask)   # b*n*3
+                pred_noise = self.model(x_t_feat, e_t_feat, vertFace_info, y_feat, vert_mask, vertFace_mask)   # b*n*3
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -853,20 +852,17 @@ class VertexGeomTrainer:
                     assert False
 
                 # Loss
-                vertex_mse_loss = torch.nn.functional.mse_loss(pred_noise[vertex_mask], noise_data['noise'][vertex_mask])
+                vert_mse_loss = torch.nn.functional.mse_loss(pred_noise[vert_mask], noise_data['noise'][vert_mask])
 
                 # Update model
-                self.scaler.scale(vertex_mse_loss).backward()
+                self.scaler.scale(vert_mse_loss).backward()
                 nn.utils.clip_grad_norm_(self.network_params, max_norm=50.0)  # clip gradient
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
             # logging
             if self.iters % 20 == 0:
-                wandb.log({"Loss-noise": vertex_mse_loss}, step=self.iters)
-
-            if self.iters % 100 == 0:
-                print("*****************Loss-noise****:", vertex_mse_loss.item())
+                wandb.log({"Loss-noise": vert_mse_loss}, step=self.iters)
 
             self.iters += 1
             progress_bar.update(1)
@@ -890,32 +886,25 @@ class VertexGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv*nf*32*32*3, b*nv, b*nv*nf, b*1
-                    vertex_geom, vv_adj, vertex_faceBbox, vertex_faceGeom, vertex_mask, vFace_mask, class_label = data
+                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv, b*nv*nf, b*1
+                    vert_geom, vv_adj, vertFace_bbox, vert_mask, vertFace_mask, class_label = data
                 else:
-                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv*nf*32*32*3, b*nv, b*nv*nf, b*1
-                    vertex_geom, vv_adj, vertex_faceBbox, vertex_faceGeom, vertex_mask, vFace_mask = data
+                    # b*nv*3, b*nv*nv, b*nv*nf*6, b*nv, b*nv*nf, b*1
+                    vert_geom, vv_adj, vertFace_bbox, vert_mask, vertFace_mask = data
                     class_label = None
-                nv = torch.nonzero(vertex_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                nf = torch.nonzero(vFace_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                vertex_geom = vertex_geom[:, :nv, ...]                # b*nv*3
+                nv = torch.nonzero(vert_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                vf = torch.nonzero(vertFace_mask.flatten(0, 1).int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
+                vert_geom = vert_geom[:, :nv, ...]                    # b*nv*3
                 vv_adj = vv_adj[:, :nv, :nv]                          # b*nv*nv
-                vertex_faceBbox = vertex_faceBbox[:, :nv, :nf, ...]   # b*nv*nf*6
-                vertex_faceGeom = vertex_faceGeom[:, :nv, :nf, ...]   # b*nv*nf*32*32*3
-                vertex_mask = vertex_mask[:, :nv]                     # b*nv
-                vFace_mask = vFace_mask[:, :nv, :nf]                  # b*nv*nf
+                vertFace_bbox = vertFace_bbox[:, :nv, :vf, ...]       # b*nv*nf*6
+                vert_mask = vert_mask[:, :nv]                         # b*nv
+                vertFace_mask = vertFace_mask[:, :nv, :vf]                    # b*nv*nf
                 vv_adj = torch.nn.functional.one_hot(vv_adj, num_classes=2)   # b*n*n*2
-                b = vertex_geom.shape[0]
+                b = vert_geom.shape[0]
 
-                # Pass through surface VAE to sample latent z
-                face_uv = torch.flatten(vertex_faceGeom, start_dim=0, end_dim=2).permute(0, 3, 1, 2)
-                face_latent = self.face_vae(face_uv)    # ?*3*4*4
-                face_latent = face_latent.unflatten(0, (b, nv, nf)).flatten(-2, -1).permute(0, 1, 2, 4, 3)   # b*nv*nf*16*3
-
-                # rescaled the latent z,  b*nv*nf*54
-                vertex_faceInfo = torch.cat(
-                    (face_latent.flatten(-2, -1) * self.z_scaled, vertex_faceBbox), dim=-1).clone().detach()
-                x_0, e_0 = xe_mask(x=vertex_geom, e=vv_adj, node_mask=vertex_mask)    # b*nv*3, b*nv*nv*2
+                # rescaled the latent z,  b*nv*nf*6
+                vertFace_info = vertFace_bbox.clone().detach()
+                x_0, e_0 = xe_mask(x=vert_geom, e=vv_adj, node_mask=vert_mask)    # b*nv*3, b*nv*nv*2
 
                 total_count += 1
 
@@ -924,17 +913,17 @@ class VertexGeomTrainer:
                     timesteps = torch.randint(step - 1, step, (b, 1), device=self.device).long()  # [batch, 1]
 
                     # Add noise
-                    noise_data = self.diffusion.add_noise(x_0, vertex_mask, t=timesteps)
+                    noise_data = self.diffusion.add_noise(x_0, vert_mask, t=timesteps)
                     x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nv*3, b*1
 
                     # Extract features
-                    feat = self.extract_feat(e_0, vertex_mask)
+                    feat = self.extract_feat(e_0, vert_mask)
                     x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()  # b*n*9
                     e_t_feat = torch.cat((e_0, feat[1]), dim=-1).float()  # b*n*n*2
                     y_feat = torch.cat((feat[2], y), dim=-1).float()  # b*12
 
                     # Predict start
-                    pred_noise = self.model(x_t_feat, e_t_feat, vertex_faceInfo, y_feat, vertex_mask, vFace_mask)   # b*n*3
+                    pred_noise = self.model(x_t_feat, e_t_feat, vertFace_info, y_feat, vert_mask, vertFace_mask)   # b*n*3
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")
@@ -942,10 +931,9 @@ class VertexGeomTrainer:
                         assert False
 
                     # Loss
-                    vertex_mse_loss = torch.nn.functional.mse_loss(pred_noise[vertex_mask],
-                                                                   noise_data['noise'][vertex_mask])
+                    vert_mse_loss = torch.nn.functional.mse_loss(pred_noise[vert_mask], noise_data['noise'][vert_mask])
 
-                    total_loss[idx] += vertex_mse_loss
+                    total_loss[idx] += vert_mse_loss
 
             progress_bar.update(1)
         progress_bar.close()
@@ -976,7 +964,7 @@ class EdgeGeomTrainer:
 
         # Initialize network
 
-        model = EdgeGeomTransformer(n_layers=6, face_geom_dim=48, edge_geom_dim=12)
+        model = EdgeGeomTransformer(n_layers=8, face_geom_dim=48, edge_geom_dim=12)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
 
@@ -1051,23 +1039,23 @@ class EdgeGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edge_ncs, edge_face_ncs, edge_face_bbox, edge_vertex, edge_mask, class_label = data
+                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
                 else:
-                    edge_ncs, edge_face_ncs, edge_face_bbox, edge_vertex, edge_mask = data
+                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edgeVert_geom, edge_mask = data
                     class_label = None
 
                 ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 edge_ncs = edge_ncs[:, :ne, ...]               # b*ne*32*3
-                edge_face_ncs = edge_face_ncs[:, :ne, ...]     # b*ne*2*32*32*3
-                edge_face_bbox = edge_face_bbox[:, :ne, ...]   # b*ne*2*6
-                edge_vertex = edge_vertex[:, :ne, ...]         # b*ne*2*3
+                edgeFace_ncs = edgeFace_ncs[:, :ne, ...]       # b*ne*2*32*32*3
+                edgeFace_bbox = edgeFace_bbox[:, :ne, ...]     # b*ne*2*6
+                edgeVert_geom = edgeVert_geom[:, :ne, ...]             # b*ne*2*3
                 edge_mask = edge_mask[:, :ne]                  # b*ne
 
                 b = edge_ncs.shape[0]
 
                 # Pass through surface/edge VAE to sample latent z
                 with torch.no_grad():
-                    face_uv = edge_face_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
+                    face_uv = edgeFace_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
                     face_z = self.face_vae(face_uv)
                     face_z = face_z.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2).unflatten(1, (ne, 2))   # b*ne*2*16*3
 
@@ -1076,17 +1064,17 @@ class EdgeGeomTrainer:
                     edge_z = edge_z.unflatten(0, (b, ne)).permute(0, 1, 3, 2)   # b*ne*4*3
 
                 # b*ne*2*(48+6)
-                edge_faceInfo = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edge_face_bbox), dim=-1)
+                edgeFace_info = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edgeFace_bbox), dim=-1)
                 e_0 = edge_z.flatten(-2, -1) * self.z_scaled       # b*ne*12
 
-                # # Augment the surface position and latent (see https://arxiv.org/abs/2106.15282)
-                # conditions = [edgePos, surfPos, surfZ]
-                # aug_data = []
-                # for data in conditions:
-                #     aug_timesteps = torch.randint(0, 15, (bsz,), device=self.device).long()
-                #     aug_noise = torch.randn(data.shape).to(self.device)
-                #     aug_data.append(self.noise_scheduler.add_noise(data, aug_noise, aug_timesteps))
-                # edgePos, surfPos, surfZ = aug_data[0], aug_data[1], aug_data[2]
+                # Augment the surface position and latent (see https://arxiv.org/abs/2106.15282)
+                conditions = [edgeFace_info, edgeVert_geom]
+                aug_data = []
+                for cond in conditions:
+                    aug_timesteps = torch.randint(0, 2, (b, 1), device=self.device).long()
+                    noise_data = self.diffusion.add_noise(cond, edge_mask, t=aug_timesteps)
+                    aug_data.append(noise_data['x_t'])
+                edgeFace_info, edgeVert_geom = aug_data[0], aug_data[1]
 
                 # Zero gradient
                 self.optimizer.zero_grad()
@@ -1096,7 +1084,7 @@ class EdgeGeomTrainer:
                 e_t, noise, t = noise_data['x_t'], noise_data['noise'], self.diffusion.normalize_t(noise_data['t'])   # b*ne*12, b*ne*12, b*1
 
                 # Predict noise
-                pred_noise = self.model(e_t, edge_faceInfo, edge_vertex, edge_mask, t)    # b*ne*12
+                pred_noise = self.model(e_t, edgeFace_info, edgeVert_geom, edge_mask, t)    # b*ne*12
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -1141,22 +1129,22 @@ class EdgeGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edge_ncs, edge_face_ncs, edge_face_bbox, edge_vertex, edge_mask, class_label = data
+                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edge_vert, edge_mask, class_label = data
                 else:
-                    edge_ncs, edge_face_ncs, edge_face_bbox, edge_vertex, edge_mask = data
+                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edge_vert, edge_mask = data
                     class_label = None
 
                 ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 edge_ncs = edge_ncs[:, :ne, ...]               # b*ne*32*3
-                edge_face_ncs = edge_face_ncs[:, :ne, ...]     # b*ne*2*32*32*3
-                edge_face_bbox = edge_face_bbox[:, :ne, ...]   # b*ne*2*6
-                edge_vertex = edge_vertex[:, :ne, ...]         # b*ne*2*3
+                edgeFace_ncs = edgeFace_ncs[:, :ne, ...]     # b*ne*2*32*32*3
+                edgeFace_bbox = edgeFace_bbox[:, :ne, ...]   # b*ne*2*6
+                edge_vert = edge_vert[:, :ne, ...]         # b*ne*2*3
                 edge_mask = edge_mask[:, :ne]                  # b*ne
 
                 b = edge_ncs.shape[0]
 
                 # Pass through surface/edge VAE to sample latent z
-                face_uv = edge_face_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
+                face_uv = edgeFace_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
                 face_z = self.face_vae(face_uv)
                 face_z = face_z.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2).unflatten(1, (ne, 2))   # b*ne*2*16*3
 
@@ -1165,7 +1153,7 @@ class EdgeGeomTrainer:
                 edge_z = edge_z.unflatten(0, (b, ne)).permute(0, 1, 3, 2)   # b*ne*4*3
 
                 # b*ne*2*(48+6)
-                edge_faceInfo = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edge_face_bbox), dim=-1)
+                edgeFace_info = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edgeFace_bbox), dim=-1)
                 e_0 = edge_z.flatten(-2, -1) * self.z_scaled       # b*ne*12
 
                 total_count += 1
@@ -1180,7 +1168,7 @@ class EdgeGeomTrainer:
                         noise_data['t'])     # b*ne*12, b*ne*18, b*1
 
                     # Predict noise
-                    pred_noise = self.model(e_t, edge_faceInfo, edge_vertex, edge_mask, t)  # b*ne*12
+                    pred_noise = self.model(e_t, edgeFace_info, edge_vert, edge_mask, t)  # b*ne*12
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")

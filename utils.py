@@ -2,7 +2,67 @@ import torch
 import random
 import string
 import numpy as np
+import os
+import pickle
 from collections import defaultdict
+
+
+def check_step_ok(file):
+    with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
+        data = pickle.load(tf)
+    faceEdge_adj, face_bbox, edge_bbox, fe_topo = (data['faceEdge_adj'], data['face_bbox_wcs'],
+                                                   data['edge_bbox_wcs'], data['fe_topo'])
+
+    # Skip over max edge-classes
+    if fe_topo.max() >= 5:
+        return False
+
+    # Skip over max size data
+    if len(face_bbox) > 50:
+        return False
+
+    for face_edges in faceEdge_adj:
+        if len(face_edges) > 30:
+            return False
+
+    # Skip faces too close to each other
+    threshold_value = 0.05
+    scaled_value = 3
+    face_bbox = face_bbox * scaled_value  # make bbox difference larger
+
+    _face_bbox_ = face_bbox.reshape(len(face_bbox), 2, 3)
+    non_repeat = _face_bbox_[:1]
+    for bbox in _face_bbox_:
+        diff = np.max(np.max(np.abs(non_repeat - bbox), -1), -1)
+        same = diff < threshold_value
+        if same.sum() >= 1:
+            continue  # repeat value
+        else:
+            non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
+    if len(non_repeat) != len(_face_bbox_):
+        return False
+
+    # Skip edges too close to each other
+    se_bbox = []
+    for adj in faceEdge_adj:
+        if len(edge_bbox[adj]) == 0:
+            return False
+        se_bbox.append(edge_bbox[adj] * scaled_value)
+
+    for bbb in se_bbox:
+        _edge_bbox_ = bbb.reshape(len(bbb), 2, 3)
+        non_repeat = _edge_bbox_[:1]
+        for bbox in _edge_bbox_:
+            diff = np.max(np.max(np.abs(non_repeat - bbox), -1), -1)
+            same = diff < threshold_value
+            if same.sum() >= 1:
+                continue  # repeat value
+            else:
+                non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
+        if len(non_repeat) != len(_edge_bbox_):
+            return False
+
+    return True
 
 
 def pad_and_stack(inputs, max_n=None):
@@ -117,7 +177,7 @@ def reconstruct_vv_adj(n_vertices, vv_list):     # array[[v1, v2, edge_idx], ...
     return vv_adj
 
 
-def construct_vertexFace(nv, edgeCorner_adj, edgeFace_adj):
+def construct_vertFace(nv, edgeCorner_adj, edgeFace_adj):
     vertex_edge_dict = {i: [] for i in range(nv)}
     for edge_id, (v1, v2) in enumerate(edgeCorner_adj):
         vertex_edge_dict[v1].append(edge_id)
@@ -127,6 +187,22 @@ def construct_vertexFace(nv, edgeCorner_adj, edgeFace_adj):
     # list[[face_1, face_2,...], ...]
     vertexFace = [np.unique(edgeFace_adj[i].reshape(-1)).tolist() for i in vertex_edge]
     return vertexFace
+
+
+def construct_faceVert(vertexFace):
+
+    # Find the total number of faces:
+    num_faces = max(max(faces) for faces in vertexFace) + 1
+
+    # Initialize the faceVertex list with empty lists
+    faceVertex = [[] for _ in range(num_faces)]
+
+    # Populate faceVertex
+    for vertex_id, faces in enumerate(vertexFace):
+        for face_id in faces:
+            faceVertex[face_id].append(vertex_id)
+
+    return faceVertex
 
 
 def construct_feTopo(edgeFace_adj):    # ne*2
@@ -151,6 +227,19 @@ def sort_box(box):
     min_corner, _ = torch.min(box.view(2, 3), dim=0)
     max_corner, _ = torch.max(box.view(2, 3), dim=0)
     return torch.stack((min_corner, max_corner))
+
+
+def sort_bbox_multi(bbox):
+    if isinstance(bbox, np.ndarray):
+        bbox = bbox.reshape(-1, 2, 3)  # n*2*3
+        bbox_min, bbox_max = bbox.min(1), bbox.max(1)  # n*3, n*3
+        return np.concatenate((bbox_min, bbox_max), axis=-1)  # n*6
+    elif isinstance(bbox, torch.Tensor):
+        bbox = bbox.view(-1, 2, 3)  # n*2*3
+        bbox_min, bbox_max = bbox.min(1)[0], bbox.max(1)[0]  # n*3, n*3
+        return torch.cat((bbox_min, bbox_max), dim=-1)  # n*6
+    else:
+        raise TypeError('Input must be either a NumPy array or a PyTorch tensor.')
 
 
 def calc_bbox_diff(bounding_boxes):
