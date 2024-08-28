@@ -168,6 +168,13 @@ def construct_faceEdge(edgeFace):
     return faceEdge
 
 
+def construct_vv_list(edgeCorner_adj):
+
+    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeCorner_adj)]
+
+    return vv_list
+
+
 def reconstruct_vv_adj(n_vertices, vv_list):     # array[[v1, v2, edge_idx], ...]
     indices = vv_list[:, :2].astype(int)  # ne*2
     vv_adj = np.zeros((n_vertices, n_vertices), dtype=int)  # nv*nv
@@ -215,6 +222,32 @@ def construct_feTopo(edgeFace_adj):    # ne*2
     assert torch.equal(fe_topo, fe_topo.transpose(0, 1))
 
     return fe_topo    # nf*nf
+
+
+def construct_fvf_geom(faceEdge_adj, edgeVert_adj, vert_geom, fvf_mask, m, nf=None):   # [[e1, e2, ...], ...], ne*2, nv*3, nf*nf
+    if nf is None:
+        nf = len(faceEdge_adj)
+
+    # Initialize fvf_geom based on the type of fvf_mask
+    if isinstance(fvf_mask, np.ndarray):
+        fvf_geom = np.zeros((nf, nf, m, 2, 3), dtype=np.float32)
+        nonzero_indices = np.nonzero(fvf_mask)
+    elif isinstance(fvf_mask, torch.Tensor):
+        fvf_geom = torch.zeros((nf, nf, m, 2, 3), dtype=torch.float32, device=fvf_mask.device)
+        nonzero_indices = torch.nonzero(fvf_mask, as_tuple=True)
+    else:
+        raise TypeError("fvf_mask must be either a numpy array or a torch tensor")
+
+    rows, cols = nonzero_indices
+    upper_triangle_indices = [(i, j) for i, j in zip(rows, cols) if i < j]
+    for i, j in upper_triangle_indices:
+        common_edges = list(set(faceEdge_adj[i]).intersection(set(faceEdge_adj[j])))
+        assert len(common_edges) > 0
+        temp = vert_geom[edgeVert_adj[common_edges]]
+        fvf_geom[i, j, :len(common_edges), ...] = temp
+        fvf_geom[j, i, :len(common_edges), ...] = temp
+
+    return fvf_geom
 
 
 def generate_random_string(length):

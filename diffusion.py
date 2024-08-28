@@ -62,7 +62,7 @@ class DDPM(nn.Module):
         x_t = torch.sqrt(alpha_t_bar) * x_0 + torch.sqrt(1 - alpha_t_bar) * noise
 
         if mask is not None:
-            x_t = x_t * (mask.view(*mask.shape[:2], *[1] * len(x_0.shape[2:])))  # b*n*d
+            x_t = x_t * (mask.view(*mask.shape[:2], *[1] * len(x_0.shape[2:])))  # b*n*d1*...
 
         return {'x_t': x_t, 'noise': noise, 't': t}
 

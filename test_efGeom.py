@@ -5,19 +5,17 @@ from tqdm import tqdm
 import torch
 import pickle
 import numpy as np
-from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransformer, EdgeGeomTransformer,
-                   VertGeomTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastDecode)
+from model import (AutoencoderKLFastDecode, FaceGeomTransformer, EdgeGeomTransformer,
+                   AutoencoderKLFastEncode, AutoencoderKL1DFastDecode)
 from diffusion import GraphDiffusion, DDPM
-from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, ncs2wcs,
-                   generate_random_string, remove_box_edge, construct_edgeFace_adj, construct_feTopo, remove_short_edge,
-                   reconstruct_vv_adj, construct_vertFace, construct_faceEdge, construct_faceVert, sort_bbox_multi)
+from utils import (pad_and_stack, pad_zero, xe_mask, generate_random_string,
+                   remove_box_edge, construct_faceEdge, sort_bbox_multi)
 from dataFeature import GraphFeatures
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from brep_functions import (
-    scale_surf, manual_edgeVert_topology,
-    optimize_edgeVert_topology, joint_optimize, construct_brep)
+from brep_functions import joint_optimize, construct_brep
 from visualization import *
-from generate import get_faceGeom, get_edgeGeom
+from generate import get_faceGeom, get_faceGeom_fvf, get_edgeGeom
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -39,10 +37,11 @@ def get_args_gdm():
     return args
 
 
-def get_topology(files, device, face_vae_encoder):
+def get_topology(files, device):
     """****************Brep Topology****************"""
     edgeVert_adj = []
     edgeFace_adj = []
+    faceEdge_adj = []
     vertFace_adj = []
     face_bbox = []
     vert_geom = []
@@ -51,6 +50,7 @@ def get_topology(files, device, face_vae_encoder):
             data = pickle.load(tf)
         edgeVert_adj.append(data['edgeCorner_adj'])  # [ne*2, ...]
         edgeFace_adj.append(torch.from_numpy(data['edgeFace_adj']).to(device))
+        faceEdge_adj.append(data['faceEdge_adj'])
         face_bbox.append(torch.from_numpy(data['face_bbox_wcs']).to(device))  # [nf*6, ...]
         vert_geom.append(torch.from_numpy(data['corner_unique']).to(device))  # [nv*3,   ]
         vertFace_adj.append(data['vertexFace'])  # [[f1, f2, ...], ...]
@@ -60,7 +60,8 @@ def get_topology(files, device, face_vae_encoder):
     vert_geom, vert_mask = pad_and_stack(vert_geom)     # b*nv*3, b*nv
 
     return {"face_mask": face_mask, "edgeVert_adj": edgeVert_adj, "edgeFace_adj": edgeFace_adj,
-            "face_bbox": face_bbox, "vert_geom": vert_geom, "vert_mask": vert_mask, "vertFace_adj": vertFace_adj}
+            "face_bbox": face_bbox, "vert_geom": vert_geom, "vert_mask": vert_mask, "vertFace_adj": vertFace_adj,
+            "faceEdge_adj": faceEdge_adj}
 
 
 def main():
@@ -93,18 +94,18 @@ def main():
 
     # Load pretrained surface vae (fast encode version)
     face_vae_encoder = AutoencoderKLFastEncode(in_channels=3,
-                                       out_channels=3,
-                                       down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
-                                                         'DownEncoderBlock2D', 'DownEncoderBlock2D'),
-                                       up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D',
-                                                       'UpDecoderBlock2D'),
-                                       block_out_channels=(128, 256, 512, 512),
-                                       layers_per_block=2,
-                                       act_fn='silu',
-                                       latent_channels=3,
-                                       norm_num_groups=32,
-                                       sample_size=512,
-                                       )
+                                               out_channels=3,
+                                               down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
+                                                                 'DownEncoderBlock2D', 'DownEncoderBlock2D'),
+                                               up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D',
+                                                               'UpDecoderBlock2D',
+                                                               'UpDecoderBlock2D'),
+                                               block_out_channels=(128, 256, 512, 512),
+                                               layers_per_block=2,
+                                               act_fn='silu',
+                                               latent_channels=3,
+                                               norm_num_groups=32,
+                                               sample_size=512)
     face_vae_encoder.load_state_dict(torch.load(args.face_vae_path), strict=False)
     face_vae_encoder = face_vae_encoder.to(device).eval()
 
@@ -142,29 +143,31 @@ def main():
     # Initial feature extractor
     extract_feat = GraphFeatures(hyper_params['extract_type'], hyper_params['node_distribution'].shape[0])
 
-    with open('batch_file_train.pkl', 'rb') as f:
+    with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 
     b_each = 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         """****************Brep Topology****************"""
-        datas = get_topology(batch_file[i:i + b_each], device, face_vae_encoder)
-        vertFace_adj, face_bbox, face_mask, edgeVert_adj, edgeFace_adj, vert_geom, vert_mask = (datas["vertFace_adj"],
-                                                                                                datas["face_bbox"],
-                                                                                                datas["face_mask"],
-                                                                                                datas["edgeVert_adj"],
-                                                                                                datas["edgeFace_adj"],
-                                                                                                datas["vert_geom"],
-                                                                                                datas["vert_mask"])
+        datas = get_topology(batch_file[i:i + b_each], device)
+        faceEdge_adj, vertFace_adj, face_bbox, face_mask, edgeVert_adj, edgeFace_adj, vert_geom, vert_mask = (
+            datas['faceEdge_adj'],
+            datas["vertFace_adj"],
+            datas["face_bbox"],
+            datas["face_mask"],
+            datas["edgeVert_adj"],
+            datas["edgeFace_adj"],
+            datas["vert_geom"],
+            datas["vert_mask"])
         b = face_bbox.shape[0]
         face_bbox = sort_bbox_multi(face_bbox.reshape(-1, 6)).reshape(b, -1, 6)
         face_bbox *= hyper_params['bbox_scaled']
         vert_geom *= hyper_params['bbox_scaled']
 
         """****************Face Geometry****************"""
-        face_geom = get_faceGeom(vertFace_adj, vert_geom, face_bbox, face_mask, extract_feat, ddpm, edgeFace_adj, device,
-                                 faceGeom_model)      # b*nf*48
+        face_geom = get_faceGeom_fvf(faceEdge_adj, edgeVert_adj, vert_geom, face_bbox, face_mask,
+                                     extract_feat, ddpm, edgeFace_adj, device, faceGeom_model)      # b*nf*48
 
         """****************Edge Geometry****************"""
         face_bbox_geom = torch.cat([face_geom, face_bbox], dim=-1)                # b*nf*54

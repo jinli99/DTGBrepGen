@@ -3,8 +3,6 @@ import pickle
 import itertools
 import numpy as np
 import torch
-import pulp
-import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
 from chamferdist import ChamferDistance
@@ -35,9 +33,16 @@ def check_loop_edge(path):
         data = pickle.load(tf)
 
     # ne*2, [(edge1, edge2, ...), ...], ne*2
-    edgeFace, faceEdge, edgeCorner = data['edgeFace_adj'], data['faceEdge_adj'], data['edgeCorner_adj']
+    edgeFace, faceEdge, edgeVert = data['edgeFace_adj'], data['faceEdge_adj'], data['edgeCorner_adj']
 
-    vertex_edge_dict = create_vertex_edge_adjacency(edgeCorner)
+    # """Check edgeVert"""
+    # sorted_edges = np.sort(edgeVert, axis=1)
+    # unique_edges = np.unique(sorted_edges, axis=0)
+    # if unique_edges.shape[0] != sorted_edges.shape[0]:
+    #     print("Two edges share the vertices")
+    # return
+
+    vertex_edge_dict = create_vertex_edge_adjacency(edgeVert)
 
     """Check Loops"""
     face_loop = []
@@ -51,16 +56,16 @@ def check_loop_edge(path):
 
             loop = []
             current_edge = start_edge
-            current_vertex = edgeCorner[current_edge][0]
+            current_vertex = edgeVert[current_edge][0]
             while current_edge not in visited_edges:
                 visited_edges.add(current_edge)
                 loop.append(current_edge)
 
                 # find next vertex
-                if edgeCorner[current_edge][0] == current_vertex:
-                    current_vertex = edgeCorner[current_edge][1]
+                if edgeVert[current_edge][0] == current_vertex:
+                    current_vertex = edgeVert[current_edge][1]
                 else:
-                    current_vertex = edgeCorner[current_edge][0]
+                    current_vertex = edgeVert[current_edge][0]
 
                 # find next edge
                 for e in vertex_edge_dict[current_vertex]:
@@ -74,53 +79,13 @@ def check_loop_edge(path):
             print(loops)
         face_loop.append(loops)
 
-
-
     """Check Common Edges"""
     for face1_edges, face2_edges in itertools.combinations(faceEdge, 2):
-        connected = are_faces_connected(face1_edges, face2_edges, edgeCorner)
+        connected = are_faces_connected(face1_edges, face2_edges, edgeVert)
         if not connected:
             print(path)
             return 0
     return 1
-
-
-class BrepTopology:
-    def __init__(self, edgeFace_adj, faceEdge_adj):
-        self.edgeFace_adj = edgeFace_adj
-        self.faceEdge_adj = faceEdge_adj
-
-    def opposite_face(self, edge_id, face_id):
-        faces = self.edgeFace_adj[edge_id]
-        return faces[0] if faces[1] == face_id else faces[1]
-
-
-def edge_choice(edge_id, condition, edges):
-
-    return random.sample(edges, len(edges))
-
-
-def construct_topology(brepTopo: BrepTopology):   # ne*2, [[e1, e2, ...], ...]
-
-    edgeFace_adj = brepTopo.edgeFace_adj.tolist()
-    faceEdge_adj = brepTopo.faceEdge_adj
-    handled_faces = {}
-
-    # for face_id, edges in enumerate(faceEdge_adj):
-    #     start_edge = None
-    #     edge_order = []
-    #     edge_loop = []
-    #
-    #     edge = edges[0]
-    #     while True:
-    #         if start_edge is None:
-    #             start_edge = edge
-    #             edge_loop.append(edge)
-    #
-    #         if brepTopo.opposite_face(edge, face_id) not in handled_faces:
-    #             edge_sort = edges[i+1:]
-    #             edge_sort = edge_choice(edge, edge_sort.append(-1) if len(edge_loop) > 1 else edge_order, edges)
-    #             for next_edge in edge_sort:
 
 
 def are_faces_connected(face1_edges, face2_edges, edgeCorner):
@@ -171,186 +136,6 @@ def scale_surf(bbox, surf, node_mask):   # b*n*6, b*n*p*3, b*n
         face_wcs.append(face)
 
     return face_wcs
-
-
-def manual_edgeVert_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
-    assert (edgeFace_adj[:, 0] - edgeFace_adj[:, 1]).abs().max() > 0
-
-    edge_start_end = edge_pnts[:, [0, -1], :]   # ne*2*3
-
-    # Initialize the faceEdge_adj list with empty lists for each face
-    faceEdge_adj = [[] for _ in range(edgeFace_adj.max()+1)]     # [[edge_id1, edge_id2, ...], ...]
-
-    total_merge_vertex = []
-
-    # Iterate over each edge in edgeFace_adj
-    for i, edge in enumerate(edgeFace_adj):
-        face1, face2 = edge.tolist()
-        faceEdge_adj[face1].append(i)
-        faceEdge_adj[face2].append(i)
-
-    for edge_ids in faceEdge_adj:   # list[edge_id1, edge_id2, ...]
-        face_edges_flatten = edge_start_end[edge_ids].reshape(-1, 3)   # (m*2)*3
-        vertex_id = torch.cat((2*torch.tensor(edge_ids).unsqueeze(-1), 2*torch.tensor(edge_ids).unsqueeze(-1)+1), dim=-1).reshape(-1)  # (m*2,)
-
-        # connect end points by closest distance
-        merged_vertex_id = []
-        for edge_idx in edge_ids:
-            start_end = edge_start_end[edge_idx]  # 2*3
-            self_id = [2 * edge_idx, 2 * edge_idx + 1]
-
-            # left endpoint
-            distance = torch.norm(face_edges_flatten - start_end[0], dim=1)  # (m*2, )
-            min_id = vertex_id[torch.argsort(distance)].tolist()
-            id_no_self = [x for x in min_id if x not in self_id]
-            merged_vertex_id.append(sorted([2 * edge_idx, id_no_self[0]]))
-
-            # right endpoint
-            distance = torch.norm(face_edges_flatten - start_end[1], dim=1)
-            min_id = vertex_id[torch.argsort(distance)].tolist()
-            id_no_self = [x for x in min_id if x not in self_id]
-            merged_vertex_id.append(sorted([2 * edge_idx + 1, id_no_self[0]]))
-
-        merged_vertex_id = torch.unique(torch.tensor(merged_vertex_id), dim=0)   # ?*2
-        if len(merged_vertex_id) != len(edge_ids):
-            print("Failed!")
-            return False, None, None
-
-        total_merge_vertex.append(merged_vertex_id)
-
-    total_merge_vertex = torch.unique(torch.cat(total_merge_vertex, dim=0), dim=0)  # ?*2
-    assert (total_merge_vertex[:, 0] - total_merge_vertex[:, 1]).abs().max() > 0
-    vertex_pnt = edge_start_end.reshape(-1, 3)   # (2*ne, 3)
-    edgeVertex_adj = torch.tensor([[2*i, 2*i+1] for i in range(len(edge_pnts))])    # ne*2
-
-    merge_cluster = [set(total_merge_vertex[1].tolist())]
-    for merge_pair in total_merge_vertex[1:]:
-        merge_pair = set(merge_pair.tolist())
-        intersection_idx = []
-        for i, existing_cluster in enumerate(merge_cluster):
-            if merge_pair & existing_cluster:
-                intersection_idx.append(i)
-        if intersection_idx:
-            # Combine the sets at intersection_idx with merge_pair
-            combined_set = set.union(*{merge_cluster[idx] for idx in intersection_idx}, merge_pair)
-
-            # Convert intersection_idx to a set for faster lookup
-            intersection_set = set(intersection_idx)
-
-            # Remove the sets at intersection_idx from merge_cluster
-            merge_cluster = [s for idx, s in enumerate(merge_cluster) if idx not in intersection_set]
-
-            # Add the combined set to merge_cluster
-            merge_cluster.append(combined_set)
-        else:
-            merge_cluster.append(merge_pair)
-    unique_vertex_pnt = []
-    new_vertex_idx = torch.arange(vertex_pnt.shape[0])  # (2*ne, )
-    for idx, cluster in enumerate(merge_cluster):
-        unique_vertex_pnt.append(vertex_pnt[list(cluster)].mean(0))
-        new_vertex_idx[list(cluster)] = idx
-
-    edgeVertex_adj = new_vertex_idx[edgeVertex_adj]   # ne*2
-
-    return True, torch.tensor(unique_vertex_pnt), edgeVertex_adj
-
-
-def optimize_edgeVert_topology(edge_pnts, edgeFace_adj):   # ne*32*3, ne*2
-
-    assert (edgeFace_adj[:, 0] - edgeFace_adj[:, 1]).abs().min() > 0
-
-    edge_start_end = edge_pnts[:, [0, -1], :]   # ne*2*3
-
-    # Initialize the faceEdge_adj list with empty lists for each face
-    faceEdge_adj = [[] for _ in range(edgeFace_adj.max()+1)]     # [[edge_id1, edge_id2, ...], ...]
-
-    total_merge_vertex = []
-
-    # Iterate over each edge in edgeFace_adj
-    for i, edge in enumerate(edgeFace_adj):
-        face1, face2 = edge.tolist()
-        faceEdge_adj[face1].append(i)
-        faceEdge_adj[face2].append(i)
-
-    for edge_ids in faceEdge_adj:   # list[edge_id1, edge_id2, ...]
-        face_edges_flatten = edge_start_end[edge_ids].reshape(-1, 3)   # (m*2)*3
-        n = face_edges_flatten.shape[0]   # n=2m
-        vertex_id = torch.cat((2*torch.tensor(edge_ids).unsqueeze(-1), 2*torch.tensor(edge_ids).unsqueeze(-1)+1), dim=-1).reshape(-1)  # (m*2,)
-        distance = torch.sqrt(torch.sum((face_edges_flatten.unsqueeze(1) - face_edges_flatten.unsqueeze(0)) ** 2, dim=-1))  # (m*2)*(m*2)
-        self_id = torch.tensor([[2*i, 2*i+1] for i in range(n//2)])    # m*2
-        max_value = 10000
-        distance[self_id[:, 0], self_id[:, 1]] = max_value
-        triu_indices = torch.triu_indices(n, n, offset=1)   # 2*(n^2-n)/2, idx tensor
-        cof = distance[triu_indices[0], triu_indices[1]]  # (n^2-n)/2
-
-        prob = pulp.LpProblem("0-1_Minimization_Problem", pulp.LpMinimize)
-
-        variable_num = len(cof)
-        x = [pulp.LpVariable(f'x{i}', cat='Binary') for i in range(variable_num)]
-
-        prob += pulp.lpSum(cof[i] * x[i] for i in range(variable_num)), "Objective_Function"
-
-        for j in range(n):
-            temp = torch.zeros((n, n))
-            temp[j, :] = 1
-            temp[:, j] = 1
-            A = temp[triu_indices[0], triu_indices[1]]  # (n^2-n)/2
-            prob += pulp.lpSum(A[i] * x[i] for i in range(variable_num)) == 1, f"Constraint_{j}"
-
-        prob.solve(pulp.PULP_CBC_CMD(msg=False))
-
-        solution_val = torch.tensor([v.varValue for v in prob.variables()])   # (n^2-n)/2
-        solution_name = torch.tensor([int(v.name[1:]) for v in prob.variables()])  # (n^2-n)/2
-        solution = torch.zeros(variable_num)
-        solution[solution_name] = solution_val
-        assert (solution[cof == max_value] == 0).all()
-        # print(pulp.value(prob.objective))
-
-        # connect end points by optimization method
-        merged_vertex_id, _ = torch.sort(vertex_id[triu_indices[:, solution > 0].transpose(0, 1)])   # ?*2
-        merged_vertex_id = torch.unique(merged_vertex_id, dim=0)   # ?*2
-
-        assert len(merged_vertex_id) == len(edge_ids)
-
-        total_merge_vertex.append(merged_vertex_id)
-
-    total_merge_vertex = torch.unique(torch.cat(total_merge_vertex, dim=0), dim=0)  # ?*2
-    assert (total_merge_vertex[:, 0] - total_merge_vertex[:, 1]).abs().max() > 0
-    vertex_pnt = edge_start_end.reshape(-1, 3)   # (2*ne, 3)
-    edgeVertex_adj = torch.tensor([[2*i, 2*i+1] for i in range(len(edge_pnts))])    # ne*2
-
-    merge_cluster = [set(total_merge_vertex[0].tolist())]
-    for merge_pair in total_merge_vertex[1:]:
-        merge_pair = set(merge_pair.tolist())
-        intersection_idx = []
-        for i, existing_cluster in enumerate(merge_cluster):
-            if merge_pair & existing_cluster:
-                intersection_idx.append(i)
-        if intersection_idx:
-            # Combine the sets at intersection_idx with merge_pair
-            combined_set = merge_pair.union(*[merge_cluster[idx] for idx in intersection_idx])
-
-            # Convert intersection_idx to a set for faster lookup
-            intersection_set = set(intersection_idx)
-
-            # Remove the sets at intersection_idx from merge_cluster
-            merge_cluster = [s for idx, s in enumerate(merge_cluster) if idx not in intersection_set]
-
-            # Add the combined set to merge_cluster
-            merge_cluster.append(combined_set)
-        else:
-            merge_cluster.append(merge_pair)
-    unique_vertex_pnt = []
-    new_vertex_idx = torch.arange(vertex_pnt.shape[0])  # (2*ne, )
-    for idx, cluster in enumerate(merge_cluster):
-        unique_vertex_pnt.append(vertex_pnt[list(cluster)].mean(0))
-        new_vertex_idx[list(cluster)] = idx
-
-    edgeVertex_adj = new_vertex_idx[edgeVertex_adj]   # ne*2
-
-    assert (edgeVertex_adj[:, 0] - edgeVertex_adj[:, 1]).abs().min() > 0
-
-    return torch.stack(unique_vertex_pnt), edgeVertex_adj, faceEdge_adj
 
 
 def compute_bbox_center_and_size(min_corner, max_corner):
@@ -724,12 +509,12 @@ def main():
     with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
         files = pickle.load(tf)['train']
 
-    # convert_iter = Pool(os.cpu_count()).imap(check_loop_edge, files)
-    # valid = 0
-    # for status in tqdm(convert_iter, total=len(files)):
-    #     valid += status
-    #
-    # print(valid)
+    convert_iter = Pool(os.cpu_count()).imap(check_loop_edge, files)
+    valid = 0
+    for status in tqdm(convert_iter, total=len(files)):
+        valid += status
+
+    print(valid)
 
     for file in files:
         check_loop_edge(file)

@@ -111,7 +111,7 @@ def load_data_with_prefix(root_folder, prefix):
 
 
 def main():
-    path = "samples/test_eg/eval/test_eg_8layers"
+    path = "samples/test_ef/eval/test_ef_04"
     files = load_data_with_prefix(path, '.stl')
     convert_iter = Pool(os.cpu_count()).imap(check_mesh, files)
     valid = 0
@@ -124,5 +124,5 @@ def main():
 
 
 if __name__ == '__main__':
-    # main()
-    print(check_mesh("samples/test_eg/eval/test_eg_6layers/Z31H65VgqcFmPew_0.stl"))
+    main()
+    # print(check_mesh("/home/jing/PythonProjects/BrepGDM/samples/test_ef/train/test_ef_02/PRhglsZI7CvDizs_0.stl"))

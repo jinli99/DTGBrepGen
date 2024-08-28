@@ -9,12 +9,11 @@ from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransfo
 from diffusion import GraphDiffusion, DDPM
 from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, ncs2wcs, generate_random_string,
                    remove_box_edge, construct_edgeFace_adj, construct_feTopo, remove_short_edge, reconstruct_vv_adj,
-                   construct_vertFace, construct_faceEdge, construct_faceVert, check_step_ok, sort_bbox_multi)
+                   construct_vertFace, construct_faceEdge, construct_faceVert, check_step_ok, sort_bbox_multi, construct_fvf_geom)
 from dataFeature import GraphFeatures
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
 from brep_functions import (
-    scale_surf, manual_edgeVert_topology,
-    optimize_edgeVert_topology, joint_optimize, construct_brep)
+    scale_surf, joint_optimize, construct_brep)
 from visualization import *
 
 import warnings
@@ -27,7 +26,7 @@ def get_args_gdm():
     parser.add_argument('--face_vae_path', type=str, default='checkpoints/furniture/vae_face/epoch_400.pt')
     parser.add_argument('--edge_vae_path', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt')
     parser.add_argument('--faceBbox_path', type=str, default='checkpoints/furniture/gdm_faceBbox/epoch_3000.pt')
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/gdm_faceGeom/epoch_3000.pt')
+    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/gdm_faceGeom_03/epoch_3000.pt')
     parser.add_argument('--vertGeom_path', type=str, default='checkpoints/furniture/gdm_vertGeom/epoch_3000.pt')
     parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/gdm_edgeGeom/epoch_2000.pt')
     parser.add_argument('--hyper_params_path', type=str, default='checkpoints/furniture/gdm_faceBbox/hyper_params.pkl')
@@ -65,6 +64,27 @@ def get_topology(files, device):
         edgeVert_adj.append(data['edgeCorner_adj'])  # [ne*2, ...]
         vv_list.append(data['vv_list'])              # list[(v1, v2, edge_idx), ...]
         edgeFace_adj.append(torch.from_numpy(data['edgeFace_adj']).to(device))
+
+    nf = max([len(i) for i in e])
+    e = [pad_zero(i, max_len=nf, dim=1) for i in e]                                 # [(nf*nf, nf), ...]
+    face_mask = torch.stack([torch.from_numpy(i[1]) for i in e], dim=0).to(device)  # b*nf
+    e = torch.stack([torch.from_numpy(i[0]) for i in e], dim=0).to(device)          # b*nf*nf
+
+    return {"e": e, "face_mask": face_mask, "edgeVert_adj": edgeVert_adj,
+            "edgeFace_adj": edgeFace_adj, "vv_list": vv_list}
+
+
+def get_manual_topology(b, device):
+    """****************Brep Topology****************"""
+    e = []
+    edgeVert_adj = []
+    edgeFace_adj = []
+    vv_list = []
+    for i in range(b):
+        e.append(np.array([[0, 1, 0, 1, 1, 1], [1, 0, 1, 0, 1, 1], [0, 1, 0, 1, 1, 1], [1, 0, 1, 0, 1, 1], [1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 0, 0]]))                    # [nf*nf, ***]
+        edgeVert_adj.append(np.array([[0, 1], [1, 2], [2, 3], [3, 0], [1, 4], [4, 5], [2, 5], [5, 7], [6, 7], [4, 6], [0, 6], [3, 7]]))    # [ne*2, ...]
+        vv_list.append([(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj[i])])                # list[(v1, v2, edge_idx), ...]
+        edgeFace_adj.append(torch.from_numpy(np.array([[0, 5], [0, 1], [0, 4], [0, 3], [1, 5], [1, 2], [1, 4], [2, 4], [2, 3], [2, 5], [3, 5], [3, 4]])).to(device))
 
     nf = max([len(i) for i in e])
     e = [pad_zero(i, max_len=nf, dim=1) for i in e]                                 # [(nf*nf, nf), ...]
@@ -183,6 +203,39 @@ def get_faceGeom(vertFace_adj, vert_geom, face_bbox, face_mask, extract_feat, dd
         return x
 
 
+# add fvf information
+def get_faceGeom_fvf(faceEdge_adj, edgeVert_adj, vert_geom, face_bbox, face_mask, extract_feat, ddpm, edgeFace_adj, device, faceGeom_model):
+    with torch.no_grad():
+        b, nf = face_bbox.shape[:2]
+        fvf_mask = [pad_zero(construct_feTopo(i).cpu().numpy(), max_len=nf, dim=1)[0] for i in
+                    edgeFace_adj]  # list[shape:nf*nf, ...]
+        fvf_mask = torch.from_numpy(np.stack(fvf_mask)).to(device)  # b*nf*nf
+
+        # b*nf*nf*(m-1)*2*3
+        fvf_geom = torch.stack([construct_fvf_geom(faceEdge_adj[i], edgeVert_adj[i], vert_geom[i], fvf_mask[i], 4, nf=nf) for i in range(b)])
+
+        x = torch.randn((b, nf, 48), device=device)  # b*nf*48
+        e = torch.nn.functional.one_hot(fvf_mask, num_classes=5)  # b*n*n*m
+        x, e = xe_mask(x=x, e=e, node_mask=face_mask)  # b*nf*48, b*n*n*m
+        feat = extract_feat(e, face_mask)
+        for t in range(ddpm.T - 1, -1, -1):
+            # Extract features
+            x_feat = torch.cat((x, feat[0]), dim=-1).float()   # b*nf*54
+            e_feat = fvf_geom.clone().detach().float()                # b*nf*nf*fv*2*3
+            y_feat = torch.cat(
+                (feat[2], torch.tensor([ddpm.normalize_t(t)] * b, device=device).unsqueeze(-1)),
+                dim=-1).float()  # b*12
+
+            # Predict start
+            pred_noise = faceGeom_model(x_feat, e_feat, y_feat, face_bbox, fvf_mask, face_mask)  # b*n*48
+
+            # Sample x
+            x = ddpm.p_sample(x, pred_noise, torch.tensor([t], device=device))  # b*nf*48
+            x, _ = xe_mask(x=x, node_mask=face_mask)  # b*nf*48
+
+        return x
+
+
 def get_edgeGeom(ddpm, face_bbox_geom, edgeFace_adj, vert_geom, edgeVert_adj, device, edgeGeom_model):
     with torch.no_grad():
         b = face_bbox_geom.shape[0]
@@ -290,7 +343,7 @@ def main():
     # with open('batch_file_test.pkl', 'wb') as f:
     #     pickle.dump(batch_file, f)
 
-    with open('batch_file_train.pkl', 'rb') as f:
+    with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 
     b = 8

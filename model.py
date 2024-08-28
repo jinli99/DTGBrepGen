@@ -1551,11 +1551,11 @@ class FaceGeomTransformer(nn.Module):
         self.mlp_in_X = nn.Sequential(nn.Linear(input_dims['x'], hidden_mlp_dims['x']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
 
-        self.mlp_in_E = nn.Sequential(nn.Linear(input_dims['e'], hidden_mlp_dims['e']), act_fn_in,
+        self.mlp_in_E = nn.Sequential(nn.Linear(5, hidden_mlp_dims['e']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
 
-        self.mlp_in_vertexInfo = nn.Sequential(nn.Linear(3, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
-                                               nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
+        self.mlp_in_vert = nn.Sequential(nn.Linear(3, hidden_mlp_dims['e']), act_fn_in,
+                                         nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
 
         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
@@ -1586,14 +1586,16 @@ class FaceGeomTransformer(nn.Module):
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
         )
 
-    def forward(self, x, e, y, face_bbox, fv_geom, fv_mask, node_mask):    # b*nf*54, b*nf*nf*m, b*12, b*nf*6, b*nf*fv*3, b*nf*fv, b*nf
+    def forward(self, x, e, y, face_bbox, fvf_mask, node_mask):    # b*nf*54, b*nf*nf*fv*2*3, b*12, b*nf*6, b*nf*fv*3, b*nf*nf, b*nf
 
         X_to_out = x[..., :self.out_dim_X]
 
-        new_E = self.mlp_in_E(e)
+        e_0 = torch.nn.functional.one_hot(fvf_mask, num_classes=5).float()
+        _, e_0 = xe_mask(e=e_0, node_mask=node_mask)
+        new_E = self.mlp_in_vert(e).mean(-2).mean(-2) + self.mlp_in_E(e_0)    # b*nf*nf*64
+
         new_E = (new_E + new_E.transpose(1, 2)) / 2
-        fv_info_embed = self.mlp_in_vertexInfo(fv_geom).mean(-2)     # b*nf*256
-        x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox)+fv_info_embed, e=new_E, node_mask=node_mask)
+        x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox), e=new_E, node_mask=node_mask)
         y = self.mlp_in_y(y)
 
         e_add = self.e_add(e)
@@ -1609,6 +1611,156 @@ class FaceGeomTransformer(nn.Module):
         x, _ = xe_mask(x=x, node_mask=node_mask)
 
         return x
+
+
+"""Version 2, using vertex geometry fvf"""
+# class FaceGeomTransformer(nn.Module):
+#     """
+#     n_layers : int -- number of layers
+#     dims : dict -- contains dimensions for each feature type
+#     """
+#     def __init__(self, n_layers: int, input_dims: dict, hidden_mlp_dims: dict, hidden_dims: dict,
+#                  output_dims: dict, act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU()):
+#         super().__init__()
+#         self.n_layers = n_layers
+#         self.out_dim_X = output_dims['x']
+#
+#         self.mlp_in_X = nn.Sequential(nn.Linear(input_dims['x'], hidden_mlp_dims['x']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+#
+#         self.mlp_in_E = nn.Sequential(nn.Linear(3, hidden_mlp_dims['e']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
+#
+#         self.mlp_in_vertexInfo = nn.Sequential(nn.Linear(3, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
+#                                                nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
+#
+#         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
+#
+#         self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
+#                                                                  de=hidden_dims['de'],
+#                                                                  dy=hidden_dims['dy'],
+#                                                                  n_head=hidden_dims['n_head'],
+#                                                                  dim_ffX=hidden_dims['dim_ffX'],
+#                                                                  dim_ffE=hidden_dims['dim_ffE'])
+#                                         for i in range(n_layers)])
+#
+#         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
+#                                        nn.Linear(hidden_mlp_dims['x'], output_dims['x']))
+#
+#         # FiLM E to X
+#         self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
+#         self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
+#
+#         # FiLM y to X
+#         self.y_x_mul = Linear(hidden_dims['dy'], hidden_dims['dx'])
+#         self.y_x_add = Linear(hidden_dims['dy'], hidden_dims['dx'])
+#
+#         self.face_bbox_embed = nn.Sequential(
+#             nn.Linear(6, hidden_dims['dx']),
+#             nn.LayerNorm(hidden_dims['dx']),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+#         )
+#
+#     def forward(self, x, e, y, face_bbox, fvf_mask, node_mask):    # b*nf*54, b*nf*nf*fv*2*3, b*12, b*nf*6, b*nf*fv*3, b*nf*nf, b*nf
+#
+#         X_to_out = x[..., :self.out_dim_X]
+#         mask = (torch.arange(e.shape[3], device=fvf_mask.device).unsqueeze(0).unsqueeze(0).unsqueeze(0) < fvf_mask.unsqueeze(-1)).float().unsqueeze(-1)
+#         new_E = self.mlp_in_E(e).mean(-2)    # b*nf*nf*fv*64
+#         new_E = (new_E * mask).sum(dim=-2) / (fvf_mask.unsqueeze(-1) + 1e-08)   # b*nf*nf*64
+#         new_E = (new_E + new_E.transpose(1, 2)) / 2
+#         x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox), e=new_E, node_mask=node_mask)
+#         y = self.mlp_in_y(y)
+#
+#         e_add = self.e_add(e)
+#         e_mul = self.e_mul(e)
+#         y_x_add = self.y_x_add(y)
+#         y_x_mul = self.y_x_mul(y)
+#         for layer in self.tf_layers:
+#             x = layer(x, e_add, e_mul, y_x_add, y_x_mul, node_mask)
+#
+#         x = self.mlp_out_X(x)
+#         x = (x + X_to_out)
+#
+#         x, _ = xe_mask(x=x, node_mask=node_mask)
+#
+#         return x
+
+
+"""Version 1, using number of edges"""
+# class FaceGeomTransformer(nn.Module):
+#     """
+#     n_layers : int -- number of layers
+#     dims : dict -- contains dimensions for each feature type
+#     """
+#     def __init__(self, n_layers: int, input_dims: dict, hidden_mlp_dims: dict, hidden_dims: dict,
+#                  output_dims: dict, act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU()):
+#         super().__init__()
+#         self.n_layers = n_layers
+#         self.out_dim_X = output_dims['x']
+#
+#         self.mlp_in_X = nn.Sequential(nn.Linear(input_dims['x'], hidden_mlp_dims['x']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+#
+#         self.mlp_in_E = nn.Sequential(nn.Linear(input_dims['e'], hidden_mlp_dims['e']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
+#
+#         self.mlp_in_vertexInfo = nn.Sequential(nn.Linear(3, hidden_dims['dx']), nn.LayerNorm(hidden_dims['dx']),
+#                                                nn.SiLU(), nn.Linear(hidden_dims['dx'], hidden_dims['dx']))
+#
+#         self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
+#
+#         self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
+#                                                                  de=hidden_dims['de'],
+#                                                                  dy=hidden_dims['dy'],
+#                                                                  n_head=hidden_dims['n_head'],
+#                                                                  dim_ffX=hidden_dims['dim_ffX'],
+#                                                                  dim_ffE=hidden_dims['dim_ffE'])
+#                                         for i in range(n_layers)])
+#
+#         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
+#                                        nn.Linear(hidden_mlp_dims['x'], output_dims['x']))
+#
+#         # FiLM E to X
+#         self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
+#         self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
+#
+#         # FiLM y to X
+#         self.y_x_mul = Linear(hidden_dims['dy'], hidden_dims['dx'])
+#         self.y_x_add = Linear(hidden_dims['dy'], hidden_dims['dx'])
+#
+#         self.face_bbox_embed = nn.Sequential(
+#             nn.Linear(6, hidden_dims['dx']),
+#             nn.LayerNorm(hidden_dims['dx']),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+#         )
+#
+#     def forward(self, x, e, y, face_bbox, fv_geom, fv_mask, node_mask):    # b*nf*54, b*nf*nf*m, b*12, b*nf*6, b*nf*fv*3, b*nf*fv, b*nf
+#
+#         X_to_out = x[..., :self.out_dim_X]
+#
+#         new_E = self.mlp_in_E(e)
+#         new_E = (new_E + new_E.transpose(1, 2)) / 2
+#         fv_info_embed = self.mlp_in_vertexInfo(fv_geom).mean(-2)     # b*nf*256
+#         x, e = xe_mask(x=self.mlp_in_X(x)+self.face_bbox_embed(face_bbox)+fv_info_embed, e=new_E, node_mask=node_mask)
+#         y = self.mlp_in_y(y)
+#
+#         e_add = self.e_add(e)
+#         e_mul = self.e_mul(e)
+#         y_x_add = self.y_x_add(y)
+#         y_x_mul = self.y_x_mul(y)
+#         for layer in self.tf_layers:
+#             x = layer(x, e_add, e_mul, y_x_add, y_x_mul, node_mask)
+#
+#         x = self.mlp_out_X(x)
+#         x = (x + X_to_out)
+#
+#         x, _ = xe_mask(x=x, node_mask=node_mask)
+#
+#         return x
 
 
 class VertGeomTransformer(nn.Module):
@@ -1780,3 +1932,115 @@ class EdgeGeomTransformer(nn.Module):
         return pred
 
 
+import torch.optim as optim
+import numpy as np
+
+class EdgeChoiceNN(nn.Module):
+    def __init__(self, edge_feature_dim, global_feature_dim, hidden_dim=64):
+        super(EdgeChoiceNN, self).__init__()
+        self.edge_encoder = nn.Sequential(
+            nn.Linear(edge_feature_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.global_encoder = nn.Sequential(
+            nn.Linear(global_feature_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, edge, reset_edges, global_feature):
+        # Encode current edge
+        edge_encoded = self.edge_encoder(edge)  # Shape: (1, hidden_dim)
+
+        # Encode reset edges
+        reset_encoded = self.edge_encoder(reset_edges)  # Shape: (n, hidden_dim)
+
+        # Encode global feature
+        global_encoded = self.global_encoder(global_feature)  # Shape: (1, hidden_dim)
+
+        # Repeat encoded current edge and global feature for each reset edge
+        edge_repeated = edge_encoded.repeat(reset_encoded.size(0), 1)  # Shape: (n, hidden_dim)
+        global_repeated = global_encoded.repeat(reset_encoded.size(0), 1)  # Shape: (n, hidden_dim)
+
+        # Concatenate all features
+        combined = torch.cat([edge_repeated, reset_encoded, global_repeated], dim=1)  # Shape: (n, hidden_dim*3)
+
+        # Compute attention scores
+        scores = self.attention(combined).squeeze(-1)  # Shape: (n,)
+
+        # Apply softmax to get probabilities
+        probabilities = self.softmax(scores)  # Shape: (n,)
+
+        return probabilities
+
+
+class EdgeChoiceModel:
+    def __init__(self, edge_feature_dim, global_feature_dim, hidden_dim=64):
+        self.model = EdgeChoiceNN(edge_feature_dim, global_feature_dim, hidden_dim)
+        self.optimizer = optim.Adam(self.model.parameters())
+        self.criterion = nn.CrossEntropyLoss()
+
+    def fit(self, edges, reset_edges_list, global_features, targets, epochs=100, batch_size=32):
+        for epoch in range(epochs):
+            for i in range(0, len(edges), batch_size):
+                batch_edges = torch.FloatTensor(edges[i:i + batch_size])
+                batch_reset_edges = [torch.FloatTensor(re) for re in reset_edges_list[i:i + batch_size]]
+                batch_global_features = torch.FloatTensor(global_features[i:i + batch_size])
+                batch_targets = torch.LongTensor(targets[i:i + batch_size])
+
+                self.optimizer.zero_grad()
+
+                loss = 0
+                for j in range(len(batch_edges)):
+                    output = self.model(batch_edges[j], batch_reset_edges[j], batch_global_features[j])
+                    loss += self.criterion(output.unsqueeze(0), batch_targets[j].unsqueeze(0))
+
+                loss /= len(batch_edges)
+                loss.backward()
+                self.optimizer.step()
+
+            if (epoch + 1) % 10 == 0:
+                print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
+
+    def edge_choice(self, edge, reset_edges, global_feature):
+        self.model.eval()
+        with torch.no_grad():
+            edge_tensor = torch.FloatTensor(edge)
+            reset_edges_tensor = torch.FloatTensor(reset_edges)
+            global_feature_tensor = torch.FloatTensor(global_feature)
+
+            probabilities = self.model(edge_tensor, reset_edges_tensor, global_feature_tensor)
+
+        return list(zip(reset_edges, probabilities.numpy(), range(len(reset_edges))))
+
+
+def main():
+    # 使用示例
+    edge_feature_dim = 5     # 假设每条边有5个特征
+    global_feature_dim = 10  # 假设全局特征有10个维度
+    model = EdgeChoiceModel(edge_feature_dim, global_feature_dim)
+
+    # 假设我们有训练数据
+    edges = np.random.rand(100, edge_feature_dim)  # 100个当前边
+    reset_edges_list = [np.random.rand(np.random.randint(5, 15), edge_feature_dim) for _ in range(100)]  # 100组重置边
+    global_features = np.random.rand(100, global_feature_dim)  # 100个全局特征
+    targets = [np.random.randint(len(re)) for re in reset_edges_list]  # 随机生成目标
+
+    # 训练模型
+    model.fit(edges, reset_edges_list, global_features, targets, epochs=50)
+
+    # 使用模型进行预测
+    edge = np.random.rand(edge_feature_dim)
+    reset_edges = np.random.rand(10, edge_feature_dim)
+    global_feature = np.random.rand(global_feature_dim)
+    choices = model.edge_choice(edge, reset_edges, global_feature)
+    print(choices)
+
+
+if __name__ == '__main__':
+    main()

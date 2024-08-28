@@ -6,7 +6,7 @@ import numpy as np
 import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
-from utils import pad_and_stack, pad_zero, reconstruct_vv_adj, construct_faceVert, sort_bbox_multi
+from utils import pad_and_stack, pad_zero, reconstruct_vv_adj, construct_faceVert, sort_bbox_multi, construct_fvf_geom
 
 
 # furniture class labels
@@ -304,20 +304,20 @@ class FaceBboxData(torch.utils.data.Dataset):
         fe_topo = fe_topo[:, random_indices]
 
         face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face + 1, dim=0)  # max_faces*6, max_faces
-        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face + 1, dim=1)  # max_faces*max_faces
+        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face + 1, dim=1)         # max_faces*max_faces
 
         if data_class is not None:
             return (
-                torch.FloatTensor(face_bbox),      # max_faces*6
-                torch.from_numpy(fe_topo),        # max_faces*max_faces
-                torch.from_numpy(mask),           # # max_faces
+                torch.FloatTensor(face_bbox),       # max_faces*6
+                torch.from_numpy(fe_topo),          # max_faces*max_faces
+                torch.from_numpy(mask),             # max_faces
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
                 torch.FloatTensor(face_bbox),  # max_faces*6
-                torch.from_numpy(fe_topo),  # max_faces*max_faces
-                torch.from_numpy(mask),  # # max_faces     # uncond deepcad/abc
+                torch.from_numpy(fe_topo),     # max_faces*max_faces
+                torch.from_numpy(mask),        # max_faces     # uncond deepcad/abc
             )
 
 
@@ -328,6 +328,7 @@ class FaceGeomData(torch.utils.data.Dataset):
         self.bbox_scaled = args.bbox_scaled
         self.aug = aug
         self.data = []
+        self.edge_classes = args.edge_classes
         # Load data
         self.data = load_data(input_data, input_list, validate, args)
         # Inflate furniture x50 times for training
@@ -348,11 +349,12 @@ class FaceGeomData(torch.utils.data.Dataset):
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
 
-        face_ncs, fe_topo, face_bbox, vert_geom = (
+        face_ncs, face_bbox, vert_geom, faceEdge_adj, edgeVert_adj = (
             data['face_ncs'],          # nf*32*32*3
-            data['fe_topo'],           # nf*nf
             data['face_bbox_wcs'],     # nf*6
             data['corner_unique'],     # nv*3
+            data['faceEdge_adj'],      # [[e1, e2, ...], ...]
+            data['edgeCorner_adj']       # ne*2
         )
 
         # Increase value range
@@ -360,32 +362,30 @@ class FaceGeomData(torch.utils.data.Dataset):
         face_bbox *= self.bbox_scaled    # nf*6
         vert_geom *= self.bbox_scaled
 
-        faceVert_adj = construct_faceVert(data['vertexFace'])        # [[v1, v2, ...], ...]
-        faceVert_geom = [vert_geom[i] for i in faceVert_adj]         # [fv*3, ...]
-        faceVert_geom, faceVert_mask = pad_and_stack(faceVert_geom, max_n=self.max_edge)   # nf*fv*3, nf*fv
+        fvf_mask = data['fe_topo']       # nf*nf
+        # nf*nf*(m-1)*2*3
+        fvf_geom = construct_fvf_geom(faceEdge_adj, edgeVert_adj, vert_geom, fvf_mask, self.edge_classes-1)
 
         # Randomly shuffle the sequence
         random_indices = np.random.permutation(face_bbox.shape[0])
         face_ncs = face_ncs[random_indices]
         face_bbox = face_bbox[random_indices]
-        fe_topo = fe_topo[random_indices, :]
-        fe_topo = fe_topo[:, random_indices]
-        faceVert_geom = faceVert_geom[random_indices]
-        faceVert_mask = faceVert_mask[random_indices]
+        fvf_mask = fvf_mask[random_indices, :]
+        fvf_mask = fvf_mask[:, random_indices]
+        fvf_geom = fvf_geom[random_indices, ...]
+        fvf_geom = fvf_geom[:, random_indices, ...]
 
-        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face + 1, dim=0)         # max_faces*6, max_faces
+        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face + 1, dim=0)           # max_faces*6, max_faces
         face_ncs, _ = pad_zero(face_ncs, max_len=self.max_face + 1, dim=0)
-        fe_topo, _ = pad_zero(fe_topo, max_len=self.max_face + 1, dim=1)                # max_faces*max_faces
-        faceVert_geom, _ = pad_zero(faceVert_geom, max_len=self.max_face + 1, dim=0)    # max_faces*fv*3
-        faceVert_mask, _ = pad_zero(faceVert_mask, max_len=self.max_face + 1, dim=0)    # max_faces*fv
+        fvf_mask, _ = pad_zero(fvf_mask, max_len=self.max_face + 1, dim=1)                # max_faces*max_faces
+        fvf_geom, _ = pad_zero(fvf_geom, max_len=self.max_face + 1, dim=1)                # max_faces*max_faces*(m-1)*2*3
 
         if data_class is not None:
             return (
                 torch.FloatTensor(face_ncs),           # max_faces*32*32*3
                 torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.from_numpy(fe_topo),             # max_faces*max_faces
-                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
-                torch.from_numpy(faceVert_mask),       # max_faces*fv
+                torch.from_numpy(fvf_mask),            # max_faces*max_faces
+                torch.FloatTensor(fvf_geom),           # max_faces*max_faces*(m-1)*2*3
                 torch.from_numpy(mask),                # max_faces
                 torch.LongTensor([data_class + 1])     # add 1, class 0 = uncond (furniture)
             )
@@ -393,9 +393,8 @@ class FaceGeomData(torch.utils.data.Dataset):
             return (
                 torch.FloatTensor(face_ncs),           # max_faces*32*32*3
                 torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.from_numpy(fe_topo),             # max_faces*max_faces
-                torch.from_numpy(faceVert_geom),       # max_faces*fv*3
-                torch.from_numpy(faceVert_mask),       # max_faces*fv
+                torch.from_numpy(fvf_mask),            # max_faces*max_faces
+                torch.FloatTensor(fvf_geom),           # max_faces*max_faces*(m-1)*2*3
                 torch.from_numpy(mask),                # max_faces     uncond deepcad/abc
             )
 
@@ -470,11 +469,11 @@ class VertGeomData(torch.utils.data.Dataset):
         if data_class is not None:
             return (
                 torch.FloatTensor(vert_geom),       # max_vertices*3
-                torch.from_numpy(vv_adj),             # max_vertices*max_vertices
+                torch.from_numpy(vv_adj),           # max_vertices*max_vertices
                 torch.FloatTensor(vertFace_bbox),   # max_vertices*vf*6
-                torch.from_numpy(mask),               # max_vertices
-                torch.from_numpy(vertFace_mask),         # max_vertices*nf
-                torch.LongTensor([data_class + 1])    # add 1, class 0 = uncond (furniture)
+                torch.from_numpy(mask),             # max_vertices
+                torch.from_numpy(vertFace_mask),    # max_vertices*nf
+                torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (

@@ -21,12 +21,12 @@ def get_args_gdm():
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='edgeGeom',)
+        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='faceGeom',)
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=4, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
     parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=1, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
@@ -44,7 +44,7 @@ def get_args_gdm():
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_gdm_edgeGeom", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_gdm_faceGeom", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -157,7 +157,7 @@ def main():
     print('Start training...')
 
     # Initialize wandb
-    # os.environ["WANDB_MODE"] = "offline"
+    os.environ["WANDB_MODE"] = "offline"
     wandb.init(project='BrepGDM', dir=args.save_dir, name=args.env)
 
     # Main training loop
