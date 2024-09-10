@@ -18,6 +18,7 @@ from torch.nn.modules.linear import Linear
 from torch.nn.modules.normalization import LayerNorm
 from torch.nn import functional as ff
 from torch import Tensor
+from torch_geometric.nn import GCNConv
 from utils import xe_mask, assert_correctly_masked, masked_softmax
 
 
@@ -1932,115 +1933,398 @@ class EdgeGeomTransformer(nn.Module):
         return pred
 
 
-import torch.optim as optim
-import numpy as np
+class TopoFeatModel(nn.Module):
+    def __init__(self, input_face_features=8, num_face_features=16):
+        super(TopoFeatModel, self).__init__()
+        self.conv1 = GCNConv(input_face_features, num_face_features)
+        self.conv2 = GCNConv(num_face_features, num_face_features)
 
-class EdgeChoiceNN(nn.Module):
-    def __init__(self, edge_feature_dim, global_feature_dim, hidden_dim=64):
-        super(EdgeChoiceNN, self).__init__()
-        self.edge_encoder = nn.Sequential(
-            nn.Linear(edge_feature_dim, hidden_dim),
-            nn.ReLU()
+    def forward(self, x, edge_index, edge_weight):
+        """
+        Args:
+            x: A tensor of shape [num_nodes, num_node_features].
+            edge_index: A tensor of shape [2, num_edges].
+            edge_weight: A tensor of shape [num_edges,]."""
+
+        x = self.conv1(x, edge_index, edge_weight)
+        x = nn.functional.relu(x)
+        x = nn.functional.dropout(x, training=self.training)
+        x = self.conv2(x, edge_index, edge_weight)
+        return x
+
+
+class TopoEncoder(nn.Module):
+    def __init__(self, input_dim=16, d_model=256, num_head=8, dim_feedforward=1024, dropout=0.1, num_layers=4):
+        super().__init__()
+
+        self.embed_layer = nn.Linear(input_dim, d_model)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_head,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
         )
-        self.global_encoder = nn.Sequential(
-            nn.Linear(global_feature_dim, hidden_dim),
-            nn.ReLU()
+
+        self.model = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=num_layers,
+            norm=nn.LayerNorm(d_model)
         )
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
+
+    def forward(self, edge_embed, edge_mask):
+        """
+        Args:
+            edge_embed: A tensor of shape [batch_size, ne+2, m].
+            edge_mask: A tensor of shape [batch_size, ne+2].
+        Returns:
+            A tensor of shape [batch_size, ne+2, d_model]."""
+
+        edge_embed = self.embed_layer(edge_embed)         # b*(ne+2)*d_model
+
+        output = self.model(edge_embed.permute(1, 0, 2), src_key_padding_mask=~edge_mask)  # (ne+2)*b*d_model
+
+        # Transpose back to b*(ne+2)*d_model
+        output = output.permute(1, 0, 2)
+
+        return output
+
+
+class TopoDecoder(nn.Module):
+    def __init__(self, max_seq_length, d_model=256, num_head=4, dim_feedforward=1024, dropout=0.1, num_layers=4):
+        super(TopoDecoder, self).__init__()
+
+        self.pos_embedding = nn.Embedding(max_seq_length, d_model)
+
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=num_head,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
+        )
+
+        self.model = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=num_layers,
+            norm=nn.LayerNorm(d_model)
+        )
+
+    @staticmethod
+    def _generate_square_subsequent_mask(sz, device):
+        """
+        Generates a target mask for the input sequence
+
+        Args:
+            sz: The Input Sequence Length.
+        Returns:
+            mask: A lower triangular matrix of shape [sequence_length, sequence_length].
+        """
+        mask = (torch.triu(torch.ones((sz, sz), device=device)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, float(0.0))
+        return mask
+
+        # """Generate a square mask for the sequence, where the mask prevents attention to future positions."""
+        # mask = torch.triu(torch.ones(sz, sz), diagonal=1).bool()
+        # mask = mask.masked_fill(mask, float('-inf'))
+        # return mask
+
+    def forward(self, seq_embed, seq_mask, sequential_context_embeddings, edge_mask):
+        """
+        Args:
+            seq_embed: A tensor with shape [batch_size, seq_len, d_model].
+            seq_mask: A tensor with shape [batch_size, seq_len].
+            sequential_context_embeddings: A tensor with shape [batch_size, ne+2, d_model].
+            edge_mask: A tensor with shape [batch_size, ne+2].
+        Returns:
+            A tensor with shape [batch_size, seq_len, d_model].
+        """
+        # assert seq_embed.shape[1] <= 390
+        seq_embed += self.pos_embedding(torch.arange(seq_embed.shape[1],
+                                                     device=seq_embed.device)).type_as(seq_embed)   # b*ns*d_model
+        # Creating masks
+        tgt_mask = self._generate_square_subsequent_mask(seq_embed.shape[1], device=seq_embed.device)
+
+        # Forward pass through the Transformer decoder
+        output = self.model(
+            tgt=seq_embed.permute(1, 0, 2),                         # [seq_len, batch_size, d_model]
+            memory=sequential_context_embeddings.permute(1, 0, 2),  # [ne+2, batch_size, d_model]
+            tgt_mask=tgt_mask,                                      # [seq_len, seq_len]
+            tgt_key_padding_mask=~seq_mask,                         # [batch_size, seq_len]
+            memory_key_padding_mask=~edge_mask                      # [batch_size, ne+2]
+        )
+
+        # Transpose back to [batch_size, seq_len, d_model]
+        output = output.permute(1, 0, 2)
+
+        return output
+
+
+class TopoSeqModel(nn.Module):
+    def __init__(self, input_face_features=8, emb_features=16, d_model=256,
+                 edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000):
+        super(TopoSeqModel, self).__init__()
+
+        self.feat_extractor = TopoFeatModel(input_face_features=input_face_features,
+                                            num_face_features=emb_features)
+        self.face_nEdge_embedding = nn.Embedding(max_edge, input_face_features)
+        self.face_idx_embedding = nn.Embedding(max_face, emb_features)
+        self.edge_idx_embedding = nn.Embedding(max_num_edge, emb_features)
+        self.edge_classes = edge_classes
+        self.max_edge = max_edge
+
+        self.even_embed = nn.Parameter(torch.randn(emb_features))
+        self.odd_embed = nn.Parameter(torch.randn(emb_features))
+        self.loop_end_embed = nn.Parameter(torch.randn(emb_features))
+        self.face_end_embed = nn.Parameter(torch.randn(emb_features))
+        self.encoder = TopoEncoder(input_dim=emb_features, d_model=d_model)
+        self.decoder = TopoDecoder(max_seq_length=max_seq_length, d_model=d_model)
+        self.project_to_pointers = nn.Linear(d_model, d_model)
+
+        self.cache = {}
+
+    @staticmethod
+    def get_edge_index(edgeFace_adj, edge_mask):
+        batch_size, ne, _ = edgeFace_adj.shape
+
+        face_offsets = torch.cumsum(torch.max(edgeFace_adj.view(batch_size, -1), dim=1)[0]+1, dim=0)
+        face_offsets = torch.cat([torch.tensor([0], device=edgeFace_adj.device), face_offsets[:-1]])
+
+        edgeFace_adj_offset = edgeFace_adj + face_offsets.reshape(-1, 1, 1)
+
+        edge_index = edgeFace_adj_offset[edge_mask]
+
+        return edge_index    # Ne*2
+
+    def graph_feat_extra(self, edgeFace_adj, edge_mask):
+        """
+        Args:
+            edgeFace_adj: A tensor of shape [batch_size, ne, 2].
+            edge_mask: A tensor of shape [batch_size, ne]."""
+
+        # compute face feature
+        edge_index = self.get_edge_index(edgeFace_adj, edge_mask)    # Ne*2
+        assert (edge_index[:, 0] - edge_index[:, 1]).abs().min() > 0
+        face_nEdges = torch.bincount(edge_index.flatten(), minlength=edge_index.max().item()+1)
+        edge_index_unique, edge_index_num = torch.unique(
+            torch.sort(edge_index, dim=1).values, dim=0, return_counts=True)
+        assert face_nEdges.max() <= self.max_edge
+        face_embed = self.face_nEdge_embedding(face_nEdges)                             # nf*input_face_features
+        assert edge_index_num.max() < self.edge_classes
+        face_feat = self.feat_extractor(face_embed, edge_index_unique.transpose(0, 1), edge_index_num/self.edge_classes)
+
+        # assign edge feature
+        edge_num_per = edge_mask.sum(1)    # b
+        face_num_per = torch.max(edgeFace_adj.flatten(1, 2), dim=1)[0] + 1   # b
+        face_feat += self.face_idx_embedding(torch.cat(
+            [torch.arange(i, device=edgeFace_adj.device) for i in face_num_per]))
+        edge_feat = face_feat[edge_index].mean(1)    # Ne*embed_features
+        edge_feat += self.edge_idx_embedding(torch.cat(
+            [torch.arange(i, device=edgeFace_adj.device) for i in edge_num_per]))
+        edge_feat = torch.cat(
+            (edge_feat+self.even_embed.unsqueeze(0), edge_feat+self.odd_embed.unsqueeze(0)), dim=-1).reshape(
+            2 * edge_feat.size(0), -1)       # (2*Ne)*embed_features
+
+        # gather edges to batch
+        edge_num_per *= 2
+        batch_size = edge_num_per.size(0)
+        edge_embed = torch.zeros((batch_size, edge_num_per.max().item(), edge_feat.size(1)),
+                                 dtype=edge_feat.dtype, device=edge_feat.device)                    # b*ne*m
+        edge_mask = torch.zeros((batch_size, edge_num_per.max().item()),
+                                dtype=torch.bool, device=edge_feat.device)                          # b*ne
+        start_idx = 0
+        for i in range(batch_size):
+            num_edges = edge_num_per[i].item()
+            end_idx = start_idx + num_edges
+
+            edge_embed[i, :num_edges, :] = edge_feat[start_idx:end_idx, :]
+            edge_mask[i, :num_edges] = True
+
+            start_idx = end_idx
+        return edge_embed, edge_mask, edge_num_per
+
+    def encoding(self, edge_embed, edge_mask):
+        batch_size = edge_mask.shape[0]
+        # b*(ne+2)*m
+        edge_embed = torch.cat([
+            self.face_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]),
+            self.loop_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]), edge_embed],
+            dim=1)
+        edge_mask = torch.nn.functional.pad(edge_mask, [2, 0, 0, 0], value=1)      # b*(ne+2)
+        edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask)      # b*(ne+2)*d_model
+        return edge_embed, edge_mask
+
+    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask):
+        """
+        Args:
+            edgeFace_adj: A tensor of shape [batch_size, ne, 2].
+            edge_mask: A tensor of shape [batch_size, ne].
+            topo_seq: A tensor of shape [batch_size, ns].
+            seq_mask: A tensor of shape [batch_size, ns].
+        Returns:
+            A tensor with shape [batch_size, ns, ne+2]."""
+
+        """Extract graph features"""
+        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
+        assert torch.all(edge_mask.sum(-1) // 2 - 1 == topo_seq.max(-1)[0] // 2)
+
+        """Transformer Encoding"""
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask)
+
+        """Transformer Decoding"""
+        batch_size = edge_mask.shape[0]
+        sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)                  # b*(ne+2)*d_model
+        seq_embed = torch.zeros((batch_size, topo_seq.shape[-1], edge_embed.shape[-1]),
+                                device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
+        for i in range(batch_size):
+            seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
+        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)    # b*ns*d_model
+
+        """Pointer Logits"""
+        pred_pointers = self.project_to_pointers(outs)                  # b*ns*d_model
+        edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
+        logits = torch.matmul(pred_pointers, edge_embed_transposed)
+        logits = logits / math.sqrt(pred_pointers.shape[-1])            # b*ns*(ne+2)
+        logits = logits * edge_mask.unsqueeze(1)
+        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9       # b*ns*(ne+2)
+
+        return logits
+
+    def save_cache(self, edgeFace_adj, edge_mask):
+        """
+        Args:
+            edgeFace_adj: A tensor of shape [batch_size, ne, 2].
+            edge_mask: A tensor of shape [batch_size, ne]."""
+
+        """Extract graph features"""
+        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
+
+        """Transformer Encoding"""
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask)
+        sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)  # b*(ne+2)*d_model
+
+        self.cache['edge_embed'] = edge_embed
+        self.cache['edge_mask'] = edge_mask
+        self.cache['sequential_context_embeddings'] = sequential_context_embeddings
+        self.cache['edge_num_per'] = edge_num_per
+
+    def clear_cache(self):
+        self.cache.clear()
+
+    def sample(self, topo_seq, seq_mask, mask):
+        """
+        Args:
+            topo_seq: A tensor of shape [batch_size, ns].
+            seq_mask: A tensor of shape [batch_size, ns].
+            mask: """
+
+        """Transformer Decoding"""
+        batch_size = topo_seq.shape[0]
+        assert batch_size == 1
+        edge_embed = self.cache['edge_embed']                                                 # b*(ne+2)*d_model
+        edge_mask = self.cache['edge_mask']                                                   # b*(ne+2)
+        sequential_context_embeddings = self.cache['sequential_context_embeddings']           # b*(ne+2)*d_model
+        edge_num_per = self.cache['edge_num_per']
+        seq_embed = torch.zeros((batch_size, topo_seq.shape[-1], edge_embed.shape[-1]),
+                                device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
+        for i in range(batch_size):
+            seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
+        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)    # b*ns*d_model
+
+        """Pointer Logits"""
+        pred_pointers = self.project_to_pointers(outs)[:, [-1], :]      # b*1*d_model
+        edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
+        logits = torch.matmul(pred_pointers, edge_embed_transposed)
+        logits = logits / math.sqrt(pred_pointers.shape[-1])            # b*1*(ne+2)
+        logits = logits * edge_mask.unsqueeze(1)
+        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9       # b*1*(ne+2)
+
+        logits = logits.squeeze()[mask]                                 # len(mask)
+
+        return logits
+
+
+class FaceEdgeModel(nn.Module):
+    def __init__(self, max_face=50, input_face_dim=2, hidden_dim=32, latent_dim=16):
+        super().__init__()
+        self.face_embedding = nn.Linear(input_face_dim, latent_dim)
+        self.max_face = max_face
+        self.latent_dim = latent_dim
+
+        # Encoder
+        self.encoder_conv1 = GCNConv(latent_dim, hidden_dim)
+        self.encoder_conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.encoder_mu = GCNConv(hidden_dim, latent_dim)
+        self.encoder_logvar = GCNConv(hidden_dim, latent_dim)
+
+        # Decoder
+        self.adj_decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, self.max_num_faces)
         )
-        self.softmax = nn.Softmax(dim=1)
+        self.face_decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_face_dim)
+        )
 
-    def forward(self, edge, reset_edges, global_feature):
-        # Encode current edge
-        edge_encoded = self.edge_encoder(edge)  # Shape: (1, hidden_dim)
+    def encode(self, x, edge_index, edge_weight):
+        """
+        Args:
+            x: A tensor of shape [max_face, 2].
+            edge_index: A tensor of shape [2, num_edges].
+            edge_weight: A tensor of shape [num_edges,].
+        Returns:
+            Both returned shapes: [max_face, latent_dim]
+        """
 
-        # Encode reset edges
-        reset_encoded = self.edge_encoder(reset_edges)  # Shape: (n, hidden_dim)
+        x = self.face_embedding(x)                                                       # (nf, 16)
+        x = torch.nn.functional.relu(self.encoder_conv1(x, edge_index, edge_weight))     # (nf, hidden_dim)
+        x = torch.nn.functional.relu(self.encoder_conv2(x, edge_index, edge_weight))     # (nf, hidden_dim)
+        return self.encoder_mu(x, edge_index), self.encoder_logvar(x, edge_index, edge_weight)
 
-        # Encode global feature
-        global_encoded = self.global_encoder(global_feature)  # Shape: (1, hidden_dim)
+    def reparameterize(self, mu, logvar):
+        # mu, logvar shapes: (max_num_faces, latent_dim)
+        if self.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return eps.mul(std).add_(mu)  # Shape: (max_num_faces, latent_dim)
+        else:
+            return mu                     # Shape: (max_num_faces, latent_dim)
 
-        # Repeat encoded current edge and global feature for each reset edge
-        edge_repeated = edge_encoded.repeat(reset_encoded.size(0), 1)  # Shape: (n, hidden_dim)
-        global_repeated = global_encoded.repeat(reset_encoded.size(0), 1)  # Shape: (n, hidden_dim)
+    def decode(self, z):
+        """
+        Args:
+            z: A tensor of shape [max_num_faces, latent_dim].
+        Returns:
+            adj: A tensor of shape [max_num_faces, max_num_faces]
+            face_state: A tensor of shape [max_num_faces, 2]
+        """
 
-        # Concatenate all features
-        combined = torch.cat([edge_repeated, reset_encoded, global_repeated], dim=1)  # Shape: (n, hidden_dim*3)
+        adj = self.adj_decoder(z)           # [max_num_faces, max_num_faces]
+        adj = torch.mm(adj, adj.t())        # [max_num_faces, max_num_faces]
+        face_state = self.face_decoder(z)   # [max_num_faces, 2]
+        return adj, face_state
 
-        # Compute attention scores
-        scores = self.attention(combined).squeeze(-1)  # Shape: (n,)
-
-        # Apply softmax to get probabilities
-        probabilities = self.softmax(scores)  # Shape: (n,)
-
-        return probabilities
-
-
-class EdgeChoiceModel:
-    def __init__(self, edge_feature_dim, global_feature_dim, hidden_dim=64):
-        self.model = EdgeChoiceNN(edge_feature_dim, global_feature_dim, hidden_dim)
-        self.optimizer = optim.Adam(self.model.parameters())
-        self.criterion = nn.CrossEntropyLoss()
-
-    def fit(self, edges, reset_edges_list, global_features, targets, epochs=100, batch_size=32):
-        for epoch in range(epochs):
-            for i in range(0, len(edges), batch_size):
-                batch_edges = torch.FloatTensor(edges[i:i + batch_size])
-                batch_reset_edges = [torch.FloatTensor(re) for re in reset_edges_list[i:i + batch_size]]
-                batch_global_features = torch.FloatTensor(global_features[i:i + batch_size])
-                batch_targets = torch.LongTensor(targets[i:i + batch_size])
-
-                self.optimizer.zero_grad()
-
-                loss = 0
-                for j in range(len(batch_edges)):
-                    output = self.model(batch_edges[j], batch_reset_edges[j], batch_global_features[j])
-                    loss += self.criterion(output.unsqueeze(0), batch_targets[j].unsqueeze(0))
-
-                loss /= len(batch_edges)
-                loss.backward()
-                self.optimizer.step()
-
-            if (epoch + 1) % 10 == 0:
-                print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
-
-    def edge_choice(self, edge, reset_edges, global_feature):
-        self.model.eval()
-        with torch.no_grad():
-            edge_tensor = torch.FloatTensor(edge)
-            reset_edges_tensor = torch.FloatTensor(reset_edges)
-            global_feature_tensor = torch.FloatTensor(global_feature)
-
-            probabilities = self.model(edge_tensor, reset_edges_tensor, global_feature_tensor)
-
-        return list(zip(reset_edges, probabilities.numpy(), range(len(reset_edges))))
+    def forward(self, x, mask):
+        """
+        Args:
+            x: A tensor of shape [batch, max_face, max_face].
+            mask: A tensor of shape [batch, max_face,].
+        Returns:
+            adj: A tensor of shape [max_num_faces, max_num_faces]
+            face_state: A tensor of shape [max_num_faces, 2]
+            mu, logvar: A tensor of shape [max_num_faces, latent_dim]
+        """
 
 
-def main():
-    # 使用示例
-    edge_feature_dim = 5     # 假设每条边有5个特征
-    global_feature_dim = 10  # 假设全局特征有10个维度
-    model = EdgeChoiceModel(edge_feature_dim, global_feature_dim)
 
-    # 假设我们有训练数据
-    edges = np.random.rand(100, edge_feature_dim)  # 100个当前边
-    reset_edges_list = [np.random.rand(np.random.randint(5, 15), edge_feature_dim) for _ in range(100)]  # 100组重置边
-    global_features = np.random.rand(100, global_feature_dim)  # 100个全局特征
-    targets = [np.random.randint(len(re)) for re in reset_edges_list]  # 随机生成目标
+        mu, logvar = self.encode(x, edge_index, edge_weight)     # shapes: (max_num_faces, latent_dim)
+        z = self.reparameterize(mu, logvar)                      # shape: (max_num_faces, latent_dim)
+        adj, face_state = self.decode(z)                         # [max_num_faces, max_num_faces], [max_num_faces, 2]
+        return adj, face_state, mu, logvar
 
-    # 训练模型
-    model.fit(edges, reset_edges_list, global_features, targets, epochs=50)
-
-    # 使用模型进行预测
-    edge = np.random.rand(edge_feature_dim)
-    reset_edges = np.random.rand(10, edge_feature_dim)
-    global_feature = np.random.rand(global_feature_dim)
-    choices = model.edge_choice(edge, reset_edges, global_feature)
-    print(choices)
-
-
-if __name__ == '__main__':
-    main()
+    def sample(self, num_samples=1, device='cpu'):
+        z = torch.randn(num_samples, self.max_num_node, self.latent_dim, device=device)
+        adj, face_state = self.decode(z)
+        return adj, face_state

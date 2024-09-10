@@ -6,7 +6,7 @@ import torch
 import wandb
 from collections import defaultdict
 from datasets import FaceBboxData, FaceGeomData, VertGeomData, EdgeGeomData
-from trainer_gather import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
+from trainers import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
 from dataFeature import GraphFeatures
 
 
@@ -157,7 +157,7 @@ def main():
     print('Start training...')
 
     # Initialize wandb
-    os.environ["WANDB_MODE"] = "offline"
+    # os.environ["WANDB_MODE"] = "offline"
     wandb.init(project='BrepGDM', dir=args.save_dir, name=args.env)
 
     # Main training loop

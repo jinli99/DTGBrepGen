@@ -8,10 +8,21 @@ from collections import defaultdict
 
 
 def check_step_ok(file):
-    with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
+    with open(os.path.join('../data_process/furniture_parsed', file), 'rb') as tf:
         data = pickle.load(tf)
     faceEdge_adj, face_bbox, edge_bbox, fe_topo = (data['faceEdge_adj'], data['face_bbox_wcs'],
                                                    data['edge_bbox_wcs'], data['fe_topo'])
+
+    # Check Topology
+    edgeVert_adj = data['edgeCorner_adj']
+    for face_edges in faceEdge_adj:
+        num_edges = len(face_edges)
+        vertices = set()
+        for edge_id in face_edges:
+            vertices.update(edgeVert_adj[edge_id])
+        num_vertices = len(vertices)
+        if num_edges != num_vertices:
+            return False
 
     # Skip over max edge-classes
     if fe_topo.max() >= 5:
@@ -120,6 +131,18 @@ def pad_zero(x, max_len, dim=0):
         raise ValueError
 
     return total, mask
+
+
+def compute_vertEdge_adj(edgeVert_adj):
+    max_vertex_id = np.max(edgeVert_adj)
+
+    vertEdge_adj = [[] for _ in range(max_vertex_id + 1)]
+
+    for edge_id, (v1, v2) in enumerate(edgeVert_adj):
+        vertEdge_adj[v1].append(edge_id)
+        vertEdge_adj[v2].append(edge_id)
+
+    return vertEdge_adj
 
 
 def construct_edgeFace_adj(edge_face_topo, node_mask=None):   # b*n*n, b*n

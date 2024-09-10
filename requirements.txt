@@ -3,4 +3,10 @@ numpy==1.26.4
 plotly==5.22.0
 PuLP==2.9.0
 tqdm==4.66.4
-wandb==0.16.3
+torch~=2.2.2+cu121
+wandb~=0.17.9
+dataclasses~=0.8
+trimesh~=4.4.4
+occwl~=2.1.0
+plyfile~=1.1
+chamferdist~=1.0.3

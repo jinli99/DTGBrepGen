@@ -354,7 +354,7 @@ class FaceGeomData(torch.utils.data.Dataset):
             data['face_bbox_wcs'],     # nf*6
             data['corner_unique'],     # nv*3
             data['faceEdge_adj'],      # [[e1, e2, ...], ...]
-            data['edgeCorner_adj']       # ne*2
+            data['edgeCorner_adj']     # ne*2
         )
 
         # Increase value range
