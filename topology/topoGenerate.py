@@ -6,7 +6,8 @@ from datasets import opposite_idx
 from typing import List
 from collections import defaultdict
 from tqdm import tqdm
-from model import TopoSeqModel
+from model import FaceEdgeModel, TopoSeqModel
+from utils import pad_zero
 
 
 class Edge:
@@ -67,7 +68,7 @@ class PieceEdges:
         return vert_seq, rest_seq
 
 
-class BrepGenerator:
+class SeqGenerator:
     def __init__(self, edgeFace_adj):
         self.edgeFace_adj = edgeFace_adj
         self.num_faces = edgeFace_adj.max() + 1
@@ -362,7 +363,7 @@ def test_valid():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TopoSeqModel(max_num_edge=144, max_seq_length=391)
-    model.load_state_dict(torch.load('../checkpoints/furniture/gdm_Topo/epoch_2500.pt'), strict=False)
+    model.load_state_dict(torch.load('../checkpoints/furniture/topo_seq/epoch_3000.pt'), strict=False)
     model = model.to(device).eval()
 
     def topo_generate(path):
@@ -375,7 +376,7 @@ def test_valid():
         model.save_cache(edgeFace_adj=edgeFace_adj, edge_mask=torch.ones((edgeFace_adj.shape[0], edgeFace_adj.shape[1]),
                                                                          device=device, dtype=torch.bool))
         for try_time in range(5):
-            generator = BrepGenerator(data['edgeFace_adj'])
+            generator = SeqGenerator(data['edgeFace_adj'])
             if generator.generate(model):
                 print("Construct Brep Topology succeed at time %d!" % try_time)
                 model.clear_cache()
@@ -449,6 +450,228 @@ def test_valid():
     #     pass
 
 
+"""MLP"""
+def test_faceEdge():
+
+    path_ = '../data_process/topoDatasets/furniture/test'
+    files = os.listdir(path_)
+    files = [os.path.join(path_, i) for i in files]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    faceEdge_model = FaceEdgeModel(nf=50, num_categories=5)
+    faceEdge_model.load_state_dict(torch.load('../checkpoints/furniture/topo_faceEdge/epoch_3000.pt'), strict=False)
+    faceEdge_model = faceEdge_model.to(device).eval()
+
+    seq_model = TopoSeqModel(max_num_edge=144, max_seq_length=391)
+    seq_model.load_state_dict(torch.load('../checkpoints/furniture/topo_seq/epoch_3000.pt'), strict=False)
+    seq_model = seq_model.to(device).eval()
+
+    valid = 0
+    with torch.no_grad():
+        for file in tqdm(files):
+
+            with open(file, "rb") as tf:
+                data = pickle.load(tf)
+            fe_topo = data['fe_topo']                                            # nf*nf
+            edge_counts = np.sum(fe_topo, axis=1)                                # nf
+            sorted_ids = np.argsort(edge_counts)[::-1]                           # nf
+            fe_topo = fe_topo[sorted_ids][:, sorted_ids]
+            assert np.all(fe_topo == fe_topo.transpose(0, 1))
+            fe_topo, mask = pad_zero(fe_topo, max_len=50, dim=1)                 # max_face*max_face, max_face
+            fe_topo = torch.from_numpy(fe_topo).to(device).unsqueeze(0)          # 1*nf*nf
+            mask = torch.from_numpy(mask).to(device).unsqueeze(0)                # 1*nf
+
+            # true topology
+            # edge_indices = torch.triu(fe_topo.squeeze(0), diagonal=1).nonzero(as_tuple=False)
+            # num_edges = fe_topo[0, edge_indices[:, 0], edge_indices[:, 1]]
+            # edgeFace_adj = edge_indices.repeat_interleave(num_edges, dim=0)      # ne*2
+            # seq_model.save_cache(edgeFace_adj=edgeFace_adj.unsqueeze(0),
+            #                      edge_mask=torch.ones((1, edgeFace_adj.shape[0]), device=device, dtype=torch.bool))
+            # for try_time in range(5):
+            #     generator = SeqGenerator(edgeFace_adj.cpu().numpy())
+            #     if generator.generate(seq_model):
+            #         print("Construct Brep Topology succeed at time %d!" % try_time)
+            #         seq_model.clear_cache()
+            #         valid += 1
+            #         break
+            # else:
+            #     print("Construct Brep Topology Failed!")
+            #     seq_model.clear_cache()
+
+            # prediction topology
+            upper_indices = torch.triu_indices(fe_topo.shape[1], fe_topo.shape[1], offset=1)
+            fe_topo_upper = fe_topo[:, upper_indices[0], upper_indices[1]]       # 1*seq_len
+            adj, mu, logvar = faceEdge_model(fe_topo_upper)                  # 1*seq_len*m, 1*latent_dim, 1*latent_dim
+            kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
+                                                           fe_topo_upper.reshape(-1),
+                                                           reduction='mean')
+            adj_sample = torch.distributions.Categorical(logits=adj).sample()           # 1*seq_len
+            print(kl_divergence.item(), recon_loss.item(), (adj_sample - fe_topo_upper).abs().sum().item())
+            adj = faceEdge_model.sequence_to_matrix(adj_sample).squeeze(0)              # nf*nf
+            edge_indices = torch.triu(adj, diagonal=1).nonzero(as_tuple=False)
+            num_edges = adj[edge_indices[:, 0], edge_indices[:, 1]]
+            edgeFace_adj = edge_indices.repeat_interleave(num_edges, dim=0)      # ne*2
+            seq_model.save_cache(edgeFace_adj=edgeFace_adj.unsqueeze(0),
+                                 edge_mask=torch.ones((1, edgeFace_adj.shape[0]), device=device, dtype=torch.bool))
+            for try_time in range(5):
+                generator = SeqGenerator(edgeFace_adj.cpu().numpy())
+                if generator.generate(seq_model):
+                    print("Construct Brep Topology succeed at time %d!" % try_time)
+                    seq_model.clear_cache()
+                    valid += 1
+                    break
+            else:
+                print("Construct Brep Topology Failed!")
+                seq_model.clear_cache()
+            pass
+
+        print(valid)
+
+
+def brep_sample():
+
+    batch = 64
+    save_dir = "../samples/topo"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    os.makedirs(save_dir, exist_ok=True)
+
+    faceEdge_model = FaceEdgeModel(nf=50, num_categories=5)
+    faceEdge_model.load_state_dict(torch.load('../checkpoints/furniture/topo_faceEdge/epoch_3000.pt'), strict=False)
+    faceEdge_model = faceEdge_model.to(device).eval()
+
+    seq_model = TopoSeqModel(max_num_edge=144, max_seq_length=391)
+    seq_model.load_state_dict(torch.load('../checkpoints/furniture/topo_seq/epoch_3000.pt'), strict=False)
+    seq_model = seq_model.to(device).eval()
+
+    adj_batch = faceEdge_model.sample(num_samples=batch)      # b*nf*nf
+    valid = 0
+
+    with torch.no_grad():
+        for i in range(batch):
+
+            adj = adj_batch[i]                                                                     # nf*nf
+            non_zero_mask = torch.any(adj != 0, dim=1)
+            adj = adj[non_zero_mask][:, non_zero_mask]                                             # nf*nf
+
+            edge_indices = torch.triu(adj, diagonal=1).nonzero(as_tuple=False)
+            num_edges = adj[edge_indices[:, 0], edge_indices[:, 1]]
+            edgeFace_adj = edge_indices.repeat_interleave(num_edges, dim=0)                        # ne*2
+
+            print(i, "has %d faces and %d edges" % (adj.shape[0], edgeFace_adj.shape[0]))
+
+            # save encoder information
+            seq_model.save_cache(edgeFace_adj=edgeFace_adj.unsqueeze(0),
+                                 edge_mask=torch.ones((1, edgeFace_adj.shape[0]), device=device, dtype=torch.bool))
+            for try_time in range(5):
+                generator = SeqGenerator(edgeFace_adj.cpu().numpy())
+                if generator.generate(seq_model):
+                    print("Construct Brep Topology succeed at time %d!" % try_time)
+                    seq_model.clear_cache()
+                    valid += 1
+                    break
+            else:
+                print("Construct Brep Topology Failed!")
+                seq_model.clear_cache()
+
+    print(valid)
+
+
+"""Graph"""
+# def test_faceEdge():
+#
+#     path_ = '../data_process/topoDatasets/furniture/test'
+#     files = os.listdir(path_)
+#     files = [os.path.join(path_, i) for i in files]
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#
+#     faceEdge_model = FaceEdgeModel(max_face=50, edge_classes=5)
+#     faceEdge_model.load_state_dict(torch.load('../checkpoints/furniture/topo_faceEdge/epoch_3000.pt'), strict=False)
+#     faceEdge_model = faceEdge_model.to(device).eval()
+#
+#     with torch.no_grad():
+#         for file in tqdm(files):
+#
+#             with open(file, "rb") as tf:
+#                 data = pickle.load(tf)
+#             fe_topo = data['fe_topo']                                            # nf*nf
+#             edge_counts = np.sum(fe_topo, axis=1)                                # nf
+#             sorted_ids = np.argsort(edge_counts)[::-1]                           # nf
+#             fe_topo = fe_topo[sorted_ids][:, sorted_ids]
+#             assert np.all(fe_topo == fe_topo.transpose(0, 1))
+#             fe_topo, mask = pad_zero(fe_topo, max_len=50, dim=1)                 # max_face*max_face, max_face
+#             fe_topo = torch.from_numpy(fe_topo).to(device).unsqueeze(0)          # 1*nf*nf
+#             mask = torch.from_numpy(mask).to(device).unsqueeze(0)                # 1*nf
+#
+#             adj, face_state, mu, logvar = faceEdge_model(fe_topo, mask)
+#
+#             # Loss
+#             face_loss = torch.nn.functional.binary_cross_entropy_with_logits(face_state, mask.float())
+#             kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+#             tri_mask = torch.triu(torch.ones(adj.shape[1], adj.shape[1]), diagonal=1).bool().to(adj.device)
+#             adj_upper = adj[:, tri_mask]          # shape: (b, num_upper_elements, m)
+#             fe_topo_upper = fe_topo[:, tri_mask]  # shape: (b, num_upper_elements)
+#             edge_loss = torch.nn.functional.cross_entropy(adj_upper.view(-1, adj.shape[-1]),
+#                                                           fe_topo_upper.view(-1),
+#                                                           reduction='mean')
+#             loss = face_loss + kl_divergence + edge_loss
+#             print(file, face_loss.item(), kl_divergence.item(), edge_loss.item())
+#             pass
+#
+#
+# def brep_sample():
+#
+#     batch = 64
+#     save_dir = "../samples/topo"
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     os.makedirs(save_dir, exist_ok=True)
+#
+#     faceEdge_model = FaceEdgeModel(max_face=50, edge_classes=5)
+#     faceEdge_model.load_state_dict(torch.load('../checkpoints/furniture/topo_faceEdge/epoch_3000.pt'), strict=False)
+#     faceEdge_model = faceEdge_model.to(device).eval()
+#
+#     seq_model = TopoSeqModel(max_num_edge=144, max_seq_length=391)
+#     seq_model.load_state_dict(torch.load('../checkpoints/furniture/topo_seq/epoch_3000.pt'), strict=False)
+#     seq_model = seq_model.to(device).eval()
+#
+#     adj_batch, face_state_batch = faceEdge_model.sample(num_samples=batch, device=device)      # b*nf*nf*5, b*nf
+#     valid = 0
+#
+#     with torch.no_grad():
+#         for i in range(batch):
+#
+#             adj, face_state = adj_batch[i], torch.nn.functional.sigmoid(face_state_batch[i])       # nf*nf*5, nf
+#             mask = torch.rand_like(face_state) < face_state
+#             adj = adj[mask][:, mask, :]
+#             adj = torch.distributions.Categorical(logits=adj).sample()                             # nf*nf
+#             adj = torch.ceil((adj + adj.transpose(0, 1)) * 0.5).long()
+#             non_zero_mask = torch.any(adj != 0, dim=1)
+#             adj = adj[non_zero_mask][:, non_zero_mask]                                             # nf*nf
+#
+#             edge_indices = torch.triu(adj, diagonal=1).nonzero(as_tuple=False)
+#             num_edges = adj[edge_indices[:, 0], edge_indices[:, 1]]
+#             edgeFace_adj = edge_indices.repeat_interleave(num_edges, dim=0)                        # ne*2
+#
+#             print(i, "has %d faces and %d edges" % (adj.shape[0], edgeFace_adj.shape[0]))
+#
+#             # save encoder information
+#             seq_model.save_cache(edgeFace_adj=edgeFace_adj.unsqueeze(0),
+#                                  edge_mask=torch.ones((1, edgeFace_adj.shape[0]), device=device, dtype=torch.bool))
+#             for try_time in range(5):
+#                 generator = SeqGenerator(edgeFace_adj.cpu().numpy())
+#                 if generator.generate(seq_model):
+#                     print("Construct Brep Topology succeed at time %d!" % try_time)
+#                     seq_model.clear_cache()
+#                     valid += 1
+#                     break
+#             print("Construct Brep Topology Failed!")
+#             seq_model.clear_cache()
+#
+#     print(valid)
+
+
 if __name__ == '__main__':
 
-    test_valid()
+    # test_valid()
+    # brep_sample()
+    test_faceEdge()

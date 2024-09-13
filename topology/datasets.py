@@ -218,7 +218,11 @@ class FaceEdgeDataset(torch.utils.data.Dataset):
 
         with open(self.data[idx], "rb") as tf:
             data = pickle.load(tf)
-        fe_topo = data['fe_topo']        # nf*nf
+        fe_topo = data['fe_topo']                                            # nf*nf
+        edge_counts = np.sum(fe_topo, axis=1)                                # nf
+        sorted_ids = np.argsort(edge_counts)[::-1]                           # nf
+        fe_topo = fe_topo[sorted_ids][:, sorted_ids]
+        assert np.all(fe_topo == fe_topo.transpose(0, 1))
         fe_topo, mask = pad_zero(fe_topo, max_len=self.max_face, dim=1)      # max_face*max_face, max_face
         return torch.from_numpy(fe_topo), torch.from_numpy(mask)
 
