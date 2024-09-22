@@ -1,8 +1,8 @@
 import os
 import wandb
 import argparse
-from datasets import FaceVaeData, EdgeVaeData
-from trainer_gather import FaceVaeTrainer, EdgeVaeTrainer
+from geometry.datasets import FaceVaeData, EdgeVaeData
+from geometry.trainers import FaceVaeTrainer, EdgeVaeTrainer
 
 
 def get_args_vae():

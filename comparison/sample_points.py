@@ -16,7 +16,7 @@ import trimesh
 from trimesh.sample import sample_surface
 from plyfile import PlyData, PlyElement
 import numpy as np
-from utils import check_step_ok
+from utils import check_step_ok, load_data_with_prefix
 
 
 def write_ply(points, filename, text=False):
@@ -30,20 +30,6 @@ def write_ply(points, filename, text=False):
 
 def find_files(folder, extension):
     return sorted([Path(os.path.join(folder, f)) for f in os.listdir(folder) if f.endswith(extension)])
-
-
-def load_data_with_prefix(root_folder, prefix):
-    data_files = []
-
-    # Walk through the directory tree starting from the root folder
-    for root, dirs, files in os.walk(root_folder):
-        for filename in files:
-            # Check if the file ends with the specified prefix
-            if filename.endswith(prefix):
-                file_path = os.path.join(root, filename)
-                data_files.append(file_path)
-
-    return data_files
 
 
 class SamplePoints:
@@ -99,7 +85,7 @@ class SamplePoints:
 
 
 def get_reference_stl():
-    with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
+    with open('../data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
         files = pickle.load(tf)['test']
 
     random.shuffle(files)

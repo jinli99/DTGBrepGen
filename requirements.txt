@@ -10,3 +10,4 @@ trimesh~=4.4.4
 occwl~=2.1.0
 plyfile~=1.1
 chamferdist~=1.0.3
+gmsh~=4.13.1

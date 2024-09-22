@@ -6,6 +6,155 @@ from tqdm import tqdm
 from model import TopoSeqModel, FaceEdgeModel
 
 
+class MultiClassFocalLossWithAlpha(nn.Module):
+    def __init__(self, alpha, gamma=2, reduction='mean'):
+        """
+        :param alpha: weight for each class
+        :param gamma:
+        :param reduction:
+        """
+        super(MultiClassFocalLossWithAlpha, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        alpha = self.alpha[target]  # shape=(bs,)
+        log_softmax = torch.log_softmax(pred, dim=1)   # shape=(bs, m)
+        log_pt = torch.gather(log_softmax, dim=1, index=target.view(-1, 1))  # shape=(bs, 1)
+        log_pt = log_pt.reshape(-1)  # shape=(bs)
+        ce_loss = -log_pt
+        pt = torch.exp(log_pt)  # shape=(bs)
+        focal_loss = alpha * (1 - pt) ** self.gamma * ce_loss  # multi class focal loss，shape=(bs)
+        if self.reduction == "mean":
+            return torch.mean(focal_loss)
+        if self.reduction == "sum":
+            return torch.sum(focal_loss)
+        return focal_loss
+
+
+class FaceEdgeTrainer:
+    def __init__(self, args, train_dataset, val_dataset):
+        self.iters = 0
+        self.epoch = 0
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.save_dir = args.save_dir
+        self.edge_classes = args.edge_classes
+        model = FaceEdgeModel(nf=args.max_face, num_categories=args.edge_classes)
+        model = nn.DataParallel(model)  # distributed training
+        self.model = model.to(self.device).train()
+        self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
+                                                            shuffle=True,
+                                                            batch_size=args.batch_size,
+                                                            num_workers=16)
+        self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
+                                                          shuffle=False,
+                                                          batch_size=args.batch_size,
+                                                          num_workers=16)
+
+        # alpha = 1 - torch.tensor([8.6229e-01, 1.3391e-01, 3.6014e-03, 1.6260e-04, 3.3725e-05], device=self.device)
+        # alpha = (alpha / alpha.sum()).float()
+        # self.class_loss = MultiClassFocalLossWithAlpha(alpha=alpha)
+
+        # Initialize optimizer
+        self.network_params = list(self.model.parameters())
+
+        self.optimizer = torch.optim.AdamW(
+            self.network_params,
+            lr=5e-4,
+            betas=(0.95, 0.999),
+            weight_decay=1e-6,
+            eps=1e-08,
+        )
+
+        self.scaler = torch.cuda.amp.GradScaler()
+
+    def train_one_epoch(self):
+
+        self.model.train()
+
+        progress_bar = tqdm(total=len(self.train_dataloader))
+        progress_bar.set_description(f"Epoch {self.epoch}")
+
+        for data in self.train_dataloader:
+            with torch.cuda.amp.autocast():
+                data = [x.to(self.device) for x in data]
+                fef_adj, _ = data                                                  # b*nf*nf, b*nf
+                upper_indices = torch.triu_indices(fef_adj.shape[1], fef_adj.shape[1], offset=1)
+                fef_adj_upper = fef_adj[:, upper_indices[0], upper_indices[1]]     # b*seq_len
+
+                # Zero gradient
+                self.optimizer.zero_grad()
+
+                # b*seq_len*m, b*latent_dim, b*latent_dim
+                adj, mu, logvar = self.model(fef_adj_upper)
+                # Loss
+                assert not torch.isnan(adj).any()
+                kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
+                                                               fef_adj_upper.reshape(-1),
+                                                               reduction='mean')
+                # recon_loss = self.class_loss(adj.reshape(-1, adj.shape[-1]), fef_adj_upper.reshape(-1))
+                loss = recon_loss + kl_divergence
+
+                # Update model
+                self.scaler.scale(loss).backward()
+
+                nn.utils.clip_grad_norm_(self.network_params, max_norm=50.0)  # clip gradient
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+            # logging
+            if self.iters % 20 == 0:
+                wandb.log({"Loss": loss}, step=self.iters)
+
+            self.iters += 1
+            progress_bar.update(1)
+
+        progress_bar.close()
+        self.epoch += 1
+
+    def test_val(self):
+
+        self.model.eval()
+
+        progress_bar = tqdm(total=len(self.val_dataloader))
+        progress_bar.set_description(f"Testing")
+        total_loss = []
+
+        for data in self.val_dataloader:
+            with torch.no_grad():
+                data = [x.to(self.device) for x in data]
+                fef_adj, _ = data                                                  # b*nf*nf, b*nf
+                upper_indices = torch.triu_indices(fef_adj.shape[1], fef_adj.shape[1], offset=1)
+                fef_adj_upper = fef_adj[:, upper_indices[0], upper_indices[1]]     # b*seq_len
+
+                # b*seq_len*m, b*latent_dim, b*latent_dim
+                adj, mu, logvar = self.model(fef_adj_upper)
+                # Loss
+                assert not torch.isnan(adj).any()
+                kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
+                                                               fef_adj_upper.reshape(-1),
+                                                               reduction='mean')
+                # recon_loss = self.class_loss(adj.reshape(-1, adj.shape[-1]), fef_adj_upper.reshape(-1))
+                loss = recon_loss + kl_divergence
+
+                total_loss.append(loss.cpu().item())
+
+            progress_bar.update(1)
+
+        progress_bar.close()
+        self.model.train()    # set to train
+
+        # logging
+        wandb.log({"Val": sum(total_loss) / len(total_loss)}, step=self.iters)
+
+    def save_model(self):
+        torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_'+str(self.epoch)+'.pt'))
+        return
+
+
 class TopoSeqTrainer:
     def __init__(self, args, train_dataset, val_dataset):
         self.iters = 0
@@ -132,240 +281,3 @@ class TopoSeqTrainer:
     def save_model(self):
         torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_'+str(self.epoch)+'.pt'))
         return
-
-
-"""MLP"""
-class FaceEdgeTrainer:
-    def __init__(self, args, train_dataset, val_dataset):
-        self.iters = 0
-        self.epoch = 0
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.save_dir = args.save_dir
-        model = FaceEdgeModel(nf=args.max_face, num_categories=args.edge_classes)
-        model = nn.DataParallel(model)  # distributed training
-        self.model = model.to(self.device).train()
-        self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
-                                                            shuffle=True,
-                                                            batch_size=args.batch_size,
-                                                            num_workers=16)
-        self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
-                                                          shuffle=False,
-                                                          batch_size=args.batch_size,
-                                                          num_workers=16)
-
-        # Initialize optimizer
-        self.network_params = list(self.model.parameters())
-
-        self.optimizer = torch.optim.AdamW(
-            self.network_params,
-            lr=5e-4,
-            betas=(0.95, 0.999),
-            weight_decay=1e-6,
-            eps=1e-08,
-        )
-
-        self.scaler = torch.cuda.amp.GradScaler()
-
-    def train_one_epoch(self):
-
-        self.model.train()
-
-        progress_bar = tqdm(total=len(self.train_dataloader))
-        progress_bar.set_description(f"Epoch {self.epoch}")
-
-        for data in self.train_dataloader:
-            with torch.cuda.amp.autocast():
-                data = [x.to(self.device) for x in data]
-                fe_topo, _ = data         # b*nf*nf, b*nf
-                upper_indices = torch.triu_indices(fe_topo.shape[1], fe_topo.shape[1], offset=1)
-                fe_topo_upper = fe_topo[:, upper_indices[0], upper_indices[1]]     # b*seq_len
-
-                # Zero gradient
-                self.optimizer.zero_grad()
-
-                # b*seq_len*m, b*latent_dim, b*latent_dim
-                adj, mu, logvar = self.model(fe_topo_upper)
-                # Loss
-                assert not torch.isnan(adj).any()
-                kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-                recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
-                                                               fe_topo_upper.reshape(-1),
-                                                               reduction='mean')
-                loss = recon_loss + 100*kl_divergence
-
-                # Update model
-                self.scaler.scale(loss).backward()
-
-                nn.utils.clip_grad_norm_(self.network_params, max_norm=50.0)  # clip gradient
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-
-            # logging
-            if self.iters % 20 == 0:
-                wandb.log({"Loss": loss}, step=self.iters)
-
-            self.iters += 1
-            progress_bar.update(1)
-
-        progress_bar.close()
-        self.epoch += 1
-
-    def test_val(self):
-
-        self.model.eval()
-
-        progress_bar = tqdm(total=len(self.val_dataloader))
-        progress_bar.set_description(f"Testing")
-        total_loss = []
-
-        for data in self.val_dataloader:
-            with torch.no_grad():
-                data = [x.to(self.device) for x in data]
-                fe_topo, _ = data         # b*nf*nf, b*nf
-                upper_indices = torch.triu_indices(fe_topo.shape[1], fe_topo.shape[1], offset=1)
-                fe_topo_upper = fe_topo[:, upper_indices[0], upper_indices[1]]     # b*seq_len
-
-                # b*seq_len*m, b*latent_dim, b*latent_dim
-                adj, mu, logvar = self.model(fe_topo_upper)
-                # Loss
-                assert not torch.isnan(adj).any()
-                kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-                recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
-                                                               fe_topo_upper.reshape(-1),
-                                                               reduction='mean')
-                loss = recon_loss + 100*kl_divergence
-
-                total_loss.append(loss.cpu().item())
-
-            progress_bar.update(1)
-
-        progress_bar.close()
-        self.model.train()    # set to train
-
-        # logging
-        wandb.log({"Val": sum(total_loss) / len(total_loss)}, step=self.iters)
-
-    def save_model(self):
-        torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_'+str(self.epoch)+'.pt'))
-        return
-
-
-"""Graph"""
-# class FaceEdgeTrainer:
-#     def __init__(self, args, train_dataset, val_dataset):
-#         self.iters = 0
-#         self.epoch = 0
-#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#         self.save_dir = args.save_dir
-#         model = FaceEdgeModel(max_face=args.max_face, edge_classes=args.edge_classes)
-#         model = nn.DataParallel(model)  # distributed training
-#         self.model = model.to(self.device).train()
-#         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
-#                                                             shuffle=True,
-#                                                             batch_size=args.batch_size,
-#                                                             num_workers=16)
-#         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
-#                                                           shuffle=False,
-#                                                           batch_size=args.batch_size,
-#                                                           num_workers=16)
-#
-#         # Initialize optimizer
-#         self.network_params = list(self.model.parameters())
-#
-#         self.optimizer = torch.optim.AdamW(
-#             self.network_params,
-#             lr=5e-4,
-#             betas=(0.95, 0.999),
-#             weight_decay=1e-6,
-#             eps=1e-08,
-#         )
-#
-#         self.scaler = torch.cuda.amp.GradScaler()
-#
-#     def train_one_epoch(self):
-#
-#         self.model.train()
-#
-#         progress_bar = tqdm(total=len(self.train_dataloader))
-#         progress_bar.set_description(f"Epoch {self.epoch}")
-#
-#         for data in self.train_dataloader:
-#             with torch.cuda.amp.autocast():
-#                 data = [x.to(self.device) for x in data]
-#                 fe_topo, mask = data         # b*nf*nf, b*nf
-#
-#                 # Zero gradient
-#                 self.optimizer.zero_grad()
-#
-#                 # b*nf*nf*m, b*nf, b*nf*z, b*nf*z
-#                 adj, face_state, mu, logvar = self.model(fe_topo, mask)
-#
-#                 # Loss
-#                 assert not torch.isnan(face_state).any()
-#                 face_loss = torch.nn.functional.binary_cross_entropy_with_logits(face_state, mask.float())
-#                 kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-#                 tri_mask = torch.triu(torch.ones(adj.shape[1], adj.shape[1]), diagonal=1).bool().to(adj.device)
-#                 adj_upper = adj[:, tri_mask]          # shape: (b, num_upper_elements, m)
-#                 fe_topo_upper = fe_topo[:, tri_mask]  # shape: (b, num_upper_elements)
-#                 edge_loss = torch.nn.functional.cross_entropy(adj_upper.view(-1, adj.shape[-1]),
-#                                                               fe_topo_upper.view(-1),
-#                                                               reduction='mean')
-#                 loss = face_loss + kl_divergence + edge_loss
-#
-#                 # Update model
-#                 self.scaler.scale(loss).backward()
-#
-#                 nn.utils.clip_grad_norm_(self.network_params, max_norm=50.0)  # clip gradient
-#                 self.scaler.step(self.optimizer)
-#                 self.scaler.update()
-#
-#             # logging
-#             if self.iters % 20 == 0:
-#                 wandb.log({"Loss": loss}, step=self.iters)
-#
-#             self.iters += 1
-#             progress_bar.update(1)
-#
-#         progress_bar.close()
-#         self.epoch += 1
-#
-#     def test_val(self):
-#
-#         self.model.eval()
-#
-#         progress_bar = tqdm(total=len(self.val_dataloader))
-#         progress_bar.set_description(f"Testing")
-#         total_loss = []
-#
-#         for data in self.val_dataloader:
-#             with torch.no_grad():
-#                 data = [x.to(self.device) for x in data]
-#                 fe_topo, mask = data         # b*nf*nf, b*nf
-#
-#                 # b*nf*nf*m, b*nf, b*nf*z, b*nf*z
-#                 adj, face_state, mu, logvar = self.model(fe_topo, mask)
-#
-#                 # Loss
-#                 assert not torch.isnan(face_state).any()
-#                 face_loss = torch.nn.functional.binary_cross_entropy_with_logits(face_state, mask.float())
-#                 kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-#                 tri_mask = torch.triu(torch.ones(adj.shape[1], adj.shape[1]), diagonal=1).bool().to(adj.device)
-#                 adj_upper = adj[:, tri_mask]          # shape: (b, num_upper_elements, m)
-#                 fe_topo_upper = fe_topo[:, tri_mask]  # shape: (b, num_upper_elements)
-#                 edge_loss = torch.nn.functional.cross_entropy(adj_upper.view(-1, adj.shape[-1]),
-#                                                               fe_topo_upper.view(-1),
-#                                                               reduction='mean')
-#                 loss = face_loss + kl_divergence + edge_loss
-#                 total_loss.append(loss.cpu().item())
-#
-#             progress_bar.update(1)
-#
-#         progress_bar.close()
-#         self.model.train()    # set to train
-#
-#         # logging
-#         wandb.log({"Val": sum(total_loss) / len(total_loss)}, step=self.iters)
-#
-#     def save_model(self):
-#         torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_'+str(self.epoch)+'.pt'))
-#         return

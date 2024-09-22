@@ -3,40 +3,12 @@ import wandb
 import os
 import torch
 import torch.nn as nn
-import pickle
 from diffusers import AutoencoderKL
 from model import (AutoencoderKL1D, FaceBboxTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastEncode,
                    FaceGeomTransformer, VertGeomTransformer, EdgeGeomTransformer)
-from diffusion import GraphDiffusion, DDPM
-from utils import edge_reshape_mask, assert_weak_one_hot, xe_mask
-from dataFeature import GraphFeatures
-
-
-class MultiClassFocalLossWithAlpha(nn.Module):
-    def __init__(self, alpha, gamma=2, reduction='mean'):
-        """
-        :param alpha: weight for each class
-        :param gamma:
-        :param reduction:
-        """
-        super(MultiClassFocalLossWithAlpha, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        alpha = self.alpha[target]  # shape=(bs,)
-        log_softmax = torch.log_softmax(pred, dim=1)   # shape=(bs, m)
-        log_pt = torch.gather(log_softmax, dim=1, index=target.view(-1, 1))  # shape=(bs, 1)
-        log_pt = log_pt.reshape(-1)  # shape=(bs)
-        ce_loss = -log_pt
-        pt = torch.exp(log_pt)  # shape=(bs)
-        focal_loss = alpha * (1 - pt) ** self.gamma * ce_loss  # multi class focal loss，shape=(bs)
-        if self.reduction == "mean":
-            return torch.mean(focal_loss)
-        if self.reduction == "sum":
-            return torch.sum(focal_loss)
-        return focal_loss
+from geometry.diffusion import DDPM
+from utils import xe_mask, make_mask
+from geometry.dataFeature import GraphFeatures
 
 
 class FaceVaeTrainer:
@@ -347,15 +319,15 @@ class FaceBboxTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    face_bbox, fe_topo, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*n, b*1
+                    face_bbox, fef_adj, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*n, b*1
                 else:
-                    face_bbox, fe_topo, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
+                    face_bbox, fef_adj, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
                     class_label = None
                 num_faces = torch.nonzero(node_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
                 face_bbox = face_bbox[:, :num_faces, :]        # b*n*6
-                fe_topo = fe_topo[:, :num_faces, :num_faces]   # b*n*n
+                fef_adj = fef_adj[:, :num_faces, :num_faces]   # b*n*n
                 node_mask = node_mask[:, :num_faces]           # b*n
-                e_0 = torch.nn.functional.one_hot(fe_topo, num_classes=self.edge_classes)   # b*n*n*m
+                e_0 = torch.nn.functional.one_hot(fef_adj, num_classes=self.edge_classes)   # b*n*n*m
 
                 # # Augment the surface position (see https://arxiv.org/abs/2106.15282)
                 # conditions = [surfPos]
@@ -425,15 +397,15 @@ class FaceBboxTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    face_bbox, fe_topo, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*1, b*1
+                    face_bbox, fef_adj, node_mask, class_label = data   # b*n*32*32*3, b*n*6, b*n*n, b*1, b*1
                 else:
-                    face_bbox, fe_topo, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
+                    face_bbox, fef_adj, node_mask = data   # b*n*32*32*3, b*n*6, b*n*n, b*1
                     class_label = None
                 num_faces = torch.nonzero(node_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
                 face_bbox = face_bbox[:, :num_faces, :]        # b*n*6
-                fe_topo = fe_topo[:, :num_faces, :num_faces]   # b*n*n
+                fef_adj = fef_adj[:, :num_faces, :num_faces]   # b*n*n
                 node_mask = node_mask[:, :num_faces]           # b*n
-                e_0 = torch.nn.functional.one_hot(fe_topo, num_classes=self.edge_classes)   # b*n*n*m
+                e_0 = torch.nn.functional.one_hot(fef_adj, num_classes=self.edge_classes)   # b*n*n*m
                 x_0 = (face_bbox * self.z_scaled).clone().detach()   # rescaled the latent z  # b*n*6
                 x_0, e_0 = xe_mask(x=x_0, e=e_0, node_mask=node_mask)
                 b = face_bbox.shape[0]
@@ -739,22 +711,7 @@ class FaceGeomTrainer:
         self.face_vae = face_vae.to(self.device).eval()
 
         # Initialize network
-        n_layers = 8
-        hidden_mlp_dims = {'x': 256, 'e': 128, 'y': 128}
-        # The dimensions should satisfy dx % n_head == 0
-        hidden_dims = {'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
-        input_dims, output_dims = dataset_info['input_dims'], dataset_info['output_dims']
-        example_data = train_dataset[0]
-        face_ncs = example_data[0].to(self.device)   # max_faces*32*32*3
-        with torch.no_grad():
-            face_uv = face_ncs.permute(0, 3, 1, 2)
-            face_latent = self.face_vae(face_uv)
-            face_latent = face_latent.flatten(-2, -1).permute(0, 2, 1)
-        input_dims['x'] += face_latent.shape[-1] * face_latent.shape[-2]
-        output_dims['x'] += face_latent.shape[-1] * face_latent.shape[-2]
-        model = FaceGeomTransformer(n_layers=n_layers, input_dims=input_dims, hidden_mlp_dims=hidden_mlp_dims,
-                                    hidden_dims=hidden_dims, output_dims=output_dims,
-                                    act_fn_in=nn.ReLU(), act_fn_out=nn.ReLU())
+        model = FaceGeomTransformer(n_layers=8, face_geom_dim=48)
         model = nn.DataParallel(model)    # distributed training
         self.model = model.to(self.device).train()
 
@@ -793,57 +750,39 @@ class FaceGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nf*32*32*3, b*nf*6, b*nf*nf, b*nf*nf*(m-1)*2*3, b*nf, b*1
-                    face_ncs, face_bbox, fvf_mask, fvf_geom, face_mask, class_label = data
+                    # b*nf*32*32*3, b*nf*6, b*nf*fv*3, b*1, b*nf*1, b*1
+                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, fvf_mask, fvf_geom, face_mask = data
+                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask = data
                     class_label = None
-                nf = torch.nonzero(face_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                fv = fvf_mask.max()
-                face_ncs = face_ncs[:, :nf, ...]          # b*nf*32*32*3
-                face_bbox = face_bbox[:, :nf, :]          # b*nf*6
-                fvf_mask = fvf_mask[:, :nf, :nf]          # b*nf*nf
-                fvf_geom = fvf_geom[:, :nf, :nf, :fv, ...]     # b*nf*nf*fv*2*3
-                face_mask = face_mask[:, :nf]             # b*nf
-                e_0 = torch.nn.functional.one_hot(fvf_mask, num_classes=self.edge_classes)   # b*n*n*m
+                nf = mask.max()
+                fv = faceVert_mask.max()
+                face_ncs = face_ncs[:, :nf, ...]                     # b*nf*32*32*3
+                face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf
                 b = face_bbox.shape[0]
+
+                mask = make_mask(mask, nf)                           # b*nf
+                faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
 
                 # Pass through surface VAE to sample latent z
                 with torch.no_grad():
                     face_uv = face_ncs.flatten(0, 1).permute(0, 3, 1, 2)
                     face_latent = self.face_vae(face_uv)
-                    face_latent = face_latent.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*n*16*3
+                    face_latent = face_latent.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*nf*16*3
 
-                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*n*48
-                x_0, e_0 = xe_mask(x=x_0, e=e_0, node_mask=face_mask)
-
-                # # Augment the datas (see https://arxiv.org/abs/2106.15282)
-                # conditions = [face_bbox, fvf_geom]
-                # aug_data = []
-                # for cond in conditions:
-                #     aug_timesteps = torch.randint(0, 7, (b, 1), device=self.device).long()
-                #     noise_data = self.diffusion.add_noise(cond, t=aug_timesteps)
-                #     aug_data.append(noise_data['x_t'])
-                # face_bbox, fvf_geom = aug_data[0], aug_data[1]    # b*nf*6, b*nf*nf*fv*2*3
-                # fvf_geom = (fvf_geom.transpose(1, 2) + fvf_geom) * 0.5
-                # face_bbox, fvf_geom = xe_mask(face_bbox, fvf_geom.flatten(start_dim=-3, end_dim=-1), node_mask=face_mask)
-                # fvf_geom = fvf_geom.unflatten(-1, (-1, 2, 3))     # b*nf*nf*fv*2*3
+                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*nf*48
+                x_0, _ = xe_mask(x=x_0, node_mask=mask)
 
                 self.optimizer.zero_grad()  # zero gradient
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, face_mask)
-                x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nf*48, b*1
+                noise_data = self.diffusion.add_noise(x_0, mask)
+                x_t, t = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nf*48, b*1
 
-                # Extract features
-                with torch.cuda.amp.autocast(enabled=False):
-                    feat = self.extract_feat(e_0, face_mask)
-                x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()    # b*nf*54
-                e_t_feat = fvf_geom.clone().detach().float()                   # b*nf*nf*fv*2*3
-                y_feat = torch.cat((feat[2], y), dim=-1).float()        # b*12
-
-                # Predict start
-                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, fvf_mask, face_mask)   # b*n*48
+                # Predict noise
+                pred_noise = self.model(x_t, face_bbox, faceVert_geom, mask, faceVert_mask, t)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -851,7 +790,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[mask], noise_data['noise'][mask])
 
                 # Update model
                 self.scaler.scale(face_mse_loss).backward()
@@ -885,20 +824,21 @@ class FaceGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nf*32*32*3, b*nf*6, b*nf*nf, b*nf*nf*(m-1)*2*3, b*nf, b*1
-                    face_ncs, face_bbox, fvf_mask, fvf_geom, face_mask, class_label = data
+                    # b*nf*32*32*3, b*nf*6, b*nf*fv*3, b*1, b*nf*1, b*1
+                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, fvf_mask, fvf_geom, face_mask = data
+                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask = data
                     class_label = None
-                nf = torch.nonzero(face_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item()+1
-                fv = fvf_mask.max()
-                face_ncs = face_ncs[:, :nf, ...]          # b*nf*32*32*3
-                face_bbox = face_bbox[:, :nf, :]          # b*nf*6
-                fvf_mask = fvf_mask[:, :nf, :nf]          # b*nf*nf
-                fvf_geom = fvf_geom[:, :nf, :nf, :fv, ...]     # b*nf*nf*fv*2*3
-                face_mask = face_mask[:, :nf]             # b*nf
-                e_0 = torch.nn.functional.one_hot(fvf_mask, num_classes=self.edge_classes)   # b*n*n*m
+                nf = mask.max()
+                fv = faceVert_mask.max()
+                face_ncs = face_ncs[:, :nf, ...]                     # b*nf*32*32*3
+                face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf*1
                 b = face_bbox.shape[0]
+
+                mask = make_mask(mask, nf)                           # b*nf
+                faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
 
                 # Pass through surface VAE to sample latent z
                 with torch.no_grad():
@@ -906,8 +846,8 @@ class FaceGeomTrainer:
                     face_latent = self.face_vae(face_uv)
                     face_latent = face_latent.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*n*16*3
 
-                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*n*48
-                x_0, e_0 = xe_mask(x=x_0, e=e_0, node_mask=face_mask)
+                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*nf*48
+                x_0, _ = xe_mask(x=x_0, node_mask=mask)
 
             total_count += 1
 
@@ -916,17 +856,11 @@ class FaceGeomTrainer:
                 timesteps = torch.randint(step - 1, step, (b, 1), device=self.device).long()  # [batch, 1]
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, face_mask, t=timesteps)
-                x_t, y = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*n*48, b*1
+                noise_data = self.diffusion.add_noise(x_0, mask, t=timesteps)
+                x_t, t = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nf*48, b*1
 
-                # Extract features
-                feat = self.extract_feat(e_0, face_mask)
-                x_t_feat = torch.cat((x_t, feat[0]), dim=-1).float()   # b*nf*54
-                e_t_feat = fvf_geom.clone().detach().float()                  # b*nf*nf*fv*2*3
-                y_feat = torch.cat((feat[2], y), dim=-1).float()       # b*12
-
-                # Predict start
-                pred_noise = self.model(x_t_feat, e_t_feat, y_feat, face_bbox, fvf_mask, face_mask)   # b*n*48
+                # Predict noise
+                pred_noise = self.model(x_t, face_bbox, faceVert_geom, mask, faceVert_mask, t)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -934,7 +868,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[mask], noise_data['noise'][mask])
 
                 total_loss[idx] += face_mse_loss
 

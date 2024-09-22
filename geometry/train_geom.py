@@ -5,9 +5,9 @@ import numpy as np
 import torch
 import wandb
 from collections import defaultdict
-from datasets import FaceBboxData, FaceGeomData, VertGeomData, EdgeGeomData
-from trainers import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
-from dataFeature import GraphFeatures
+from geometry.datasets import FaceBboxData, FaceGeomData, VertGeomData, EdgeGeomData
+from geometry.trainers import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
+from geometry.dataFeature import GraphFeatures
 
 
 def get_args_gdm():
@@ -65,22 +65,22 @@ def compute_dataset_info(args):
     for path in datas:
         with open(os.path.join(args.data, path), 'rb') as file:
             data = pickle.load(file)
-            fe_topo = data['fe_topo']
+            fef_adj = data['fef_adj']
             max_num_edge = max(max_num_edge, len(data['edgeFace_adj']))
             max_vertex = max(max_vertex, len(data['corner_unique']))
             max_vertexFace = max(max_vertexFace, max([len(i) for i in data['vertexFace']]))
-            assert np.array_equal(fe_topo, fe_topo.T) and np.all(np.diag(fe_topo) == 0)
+            assert np.array_equal(fef_adj, fef_adj.T) and np.all(np.diag(fef_adj) == 0)
 
-            unique, counts = np.unique(fe_topo, return_counts=True)
+            unique, counts = np.unique(fef_adj, return_counts=True)
             for value, count in zip(unique, counts):
                 integer_counts[value] += count
 
-            n = fe_topo.shape[0]
+            n = fef_adj.shape[0]
             if 0 in integer_counts:
                 integer_counts[0] -= n
 
-            if fe_topo.shape[0] <= args.max_face:
-                node_distribution[fe_topo.shape[0]] += 1
+            if fef_adj.shape[0] <= args.max_face:
+                node_distribution[fef_adj.shape[0]] += 1
 
     args.max_num_edge = max_num_edge
     args.max_vertex = max_vertex
@@ -105,9 +105,9 @@ def compute_dataset_info(args):
                 break
     input_dims = {'x': 0, 'e': args.edge_classes, 'y': 1}
     extract_feat = GraphFeatures(args.extract_type, args.max_face)
-    fe_topo = torch.from_numpy(example_data['fe_topo'])
+    fef_adj = torch.from_numpy(example_data['fef_adj'])
     example_feat = extract_feat(torch.nn.functional.one_hot(
-        fe_topo, num_classes=args.edge_classes).unsqueeze(0), torch.ones(1, fe_topo.shape[0], dtype=torch.bool))
+        fef_adj, num_classes=args.edge_classes).unsqueeze(0), torch.ones(1, fef_adj.shape[0], dtype=torch.bool))
     input_dims['x'] += example_feat[0].shape[-1]
     input_dims['e'] += example_feat[1].shape[-1]
     input_dims['y'] += example_feat[2].shape[-1]

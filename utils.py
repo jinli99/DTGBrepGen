@@ -8,13 +8,13 @@ from collections import defaultdict
 
 
 def check_step_ok(file):
-    with open(os.path.join('../data_process/furniture_parsed', file), 'rb') as tf:
+    with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
         data = pickle.load(tf)
-    faceEdge_adj, face_bbox, edge_bbox, fe_topo = (data['faceEdge_adj'], data['face_bbox_wcs'],
-                                                   data['edge_bbox_wcs'], data['fe_topo'])
+    faceEdge_adj, face_bbox, edge_bbox, fef_adj = (data['faceEdge_adj'], data['face_bbox_wcs'],
+                                                   data['edge_bbox_wcs'], data['fef_adj'])
 
     # Check Topology
-    edgeVert_adj = data['edgeCorner_adj']
+    edgeVert_adj = data['edgeVert_adj']
     for face_edges in faceEdge_adj:
         num_edges = len(face_edges)
         vertices = set()
@@ -25,7 +25,7 @@ def check_step_ok(file):
             return False
 
     # Skip over max edge-classes
-    if fe_topo.max() >= 5:
+    if fef_adj.max() >= 5:
         return False
 
     # Skip over max size data
@@ -191,9 +191,9 @@ def construct_faceEdge(edgeFace):
     return faceEdge
 
 
-def construct_vv_list(edgeCorner_adj):
+def construct_vv_list(edgeVert_adj):
 
-    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeCorner_adj)]
+    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj)]
 
     return vv_list
 
@@ -207,9 +207,9 @@ def reconstruct_vv_adj(n_vertices, vv_list):     # array[[v1, v2, edge_idx], ...
     return vv_adj
 
 
-def construct_vertFace(nv, edgeCorner_adj, edgeFace_adj):
+def construct_vertFace(nv, edgeVert_adj, edgeFace_adj):
     vertex_edge_dict = {i: [] for i in range(nv)}
-    for edge_id, (v1, v2) in enumerate(edgeCorner_adj):
+    for edge_id, (v1, v2) in enumerate(edgeVert_adj):
         vertex_edge_dict[v1].append(edge_id)
         vertex_edge_dict[v2].append(edge_id)
 
@@ -237,14 +237,14 @@ def construct_faceVert(vertexFace):
 
 def construct_feTopo(edgeFace_adj):    # ne*2
     num_faces = edgeFace_adj.max()+1
-    fe_topo = torch.zeros((num_faces, num_faces), device=edgeFace_adj.device, dtype=edgeFace_adj.dtype)   # nf*nf
+    fef_adj = torch.zeros((num_faces, num_faces), device=edgeFace_adj.device, dtype=edgeFace_adj.dtype)   # nf*nf
     for face_idx in edgeFace_adj:
-        fe_topo[face_idx[0], face_idx[1]] += 1
-        fe_topo[face_idx[1], face_idx[0]] += 1
+        fef_adj[face_idx[0], face_idx[1]] += 1
+        fef_adj[face_idx[1], face_idx[0]] += 1
 
-    assert torch.equal(fe_topo, fe_topo.transpose(0, 1))
+    assert torch.equal(fef_adj, fef_adj.transpose(0, 1))
 
-    return fe_topo    # nf*nf
+    return fef_adj    # nf*nf
 
 
 def construct_fvf_geom(faceEdge_adj, edgeVert_adj, vert_geom, fvf_mask, m, nf=None):   # [[e1, e2, ...], ...], ne*2, nv*3, nf*nf
@@ -277,6 +277,20 @@ def generate_random_string(length):
     characters = string.ascii_letters + string.digits  # You can include other characters if needed
     random_string = ''.join(random.choice(characters) for _ in range(length))
     return random_string
+
+
+def load_data_with_prefix(root_folder, prefix):
+    data_files = []
+
+    # Walk through the directory tree starting from the root folder
+    for root, dirs, files in os.walk(root_folder):
+        for filename in files:
+            # Check if the file ends with the specified prefix
+            if filename.endswith(prefix):
+                file_path = os.path.join(root, filename)
+                data_files.append(file_path)
+
+    return data_files
 
 
 def sort_box(box):
@@ -409,6 +423,33 @@ def ncs2wcs(bbox, ncs):   # n*6, n32*3
     ratio = (size / (max_xyz - min_xyz)).amin(-1)  # n
     ncs = (ncs - ((min_xyz + max_xyz) * 0.5).unsqueeze(1)) * ratio.unsqueeze(-1).unsqueeze(-1) + center.unsqueeze(1)
     return ncs
+
+
+def make_mask(mask, n):
+    """
+    Args:
+        mask: shape with [..., 1]
+        n: expand dim
+    """
+    assert mask.shape[-1] == 1
+
+    if isinstance(mask, np.ndarray):
+
+        mask_shape = mask.shape
+        expand_shape = mask_shape[:-1] + (n,)
+        expand_mask = np.arange(n).reshape(1, -1)
+        expand_mask = np.broadcast_to(expand_mask, expand_shape)
+        return expand_mask < mask
+
+    elif isinstance(mask, torch.Tensor):
+
+        mask_shape = mask.shape
+        expand_shape = mask_shape[:-1] + (n,)
+        expand_mask = torch.arange(n).view(1, -1).expand(expand_shape).to(mask.device)
+        return expand_mask < mask
+
+    else:
+        raise TypeError("mask must be either a numpy array or a torch tensor")
 
 
 def xe_mask(x=None, e=None, node_mask=None, check_sym=True):

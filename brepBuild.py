@@ -1,11 +1,15 @@
-import os.path
-import pickle
-import itertools
 import numpy as np
 import torch
-from tqdm import tqdm
+import time
+import sys
+import os
+import gmsh
+import multiprocessing
 from multiprocessing.pool import Pool
+from tqdm import tqdm
 from chamferdist import ChamferDistance
+from contextlib import contextmanager
+from typing import Optional
 from OCC.Core.TColgp import TColgp_Array2OfPnt
 from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSpline
 from OCC.Core.GeomAbs import GeomAbs_C2
@@ -16,79 +20,130 @@ from OCC.Core.gp import gp_Pnt
 from OCC.Core.ShapeFix import ShapeFix_Face, ShapeFix_Wire, ShapeFix_Edge
 from OCC.Core.ShapeAnalysis import ShapeAnalysis_Wire
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
-from collections import defaultdict
+from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+from OCC.Core.StlAPI import StlAPI_Writer
+from OCC.Core.STEPControl import STEPControl_Reader
+from OCC.Core.IFSelect import IFSelect_RetDone
+from utils import load_data_with_prefix
 
 
-def create_vertex_edge_adjacency(edgeCorner):
-    vertex_edge_dict = defaultdict(list)
-    for edge_id, (v1, v2) in enumerate(edgeCorner):
-        vertex_edge_dict[v1].append(edge_id)
-        vertex_edge_dict[v2].append(edge_id)
-    return vertex_edge_dict
+class Brep2Mesh:
+
+    METHOD_GMSH = 'gmsh'
+    METHOD_OCC = 'occ'
+
+    def __init__(self, input_path: str, save_path: Optional[str] = None,
+                 method: str = METHOD_GMSH, timeout: int = 4, deflection: float = 0.001):
+
+        """Initialize the Brep2Mesh converter.
+
+        Args:
+            input_path (str): Path to the input step files.
+            save_path (str, optional): Path to save the output mesh files. Defaults to input_path.
+            method (str): Mesh generation method ('gmsh' or 'occ'). Defaults to 'gmsh'.
+            timeout (int): Timeout for mesh generation using gmsh method. Defaults to 2.
+            deflection (float): Deflection parameter for mesh generation. Defaults to 0.001.
+        """
+
+        self.files = load_data_with_prefix(input_path, '.step')
+        self.save_path = save_path or input_path
+        os.makedirs(self.save_path, exist_ok=True)
+
+        if method not in [self.METHOD_GMSH, self.METHOD_OCC]:
+            raise ValueError(f"Invalid method: {method}. Choose either 'gmsh' or 'occ'.")
+        self.method: str = method
+
+        self.timeout: int = timeout
+        self.deflection: float = deflection
+
+    def occMesh(self, file):
+        step_reader = STEPControl_Reader()
+        status = step_reader.ReadFile(file)
+
+        if status != IFSelect_RetDone:
+            raise ValueError("Error: Cannot read the STEP file")
+
+        step_reader.TransferRoot()
+        shape = step_reader.Shape()
+
+        mesh = BRepMesh_IncrementalMesh(shape, self.deflection)
+        mesh.Perform()
+
+        stl_writer = StlAPI_Writer()
+        stl_writer.Write(shape, os.path.join(self.save_path, os.path.splitext(os.path.basename(file))[0] + '.stl'))
+
+    @contextmanager
+    def suppress_stdout_stderr(self):
+        with open(os.devnull, "w") as devnull:
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = devnull
+            sys.stderr = devnull
+            try:
+                yield
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
+    def gMesh_single(self, file_path):
+        try:
+            with self.suppress_stdout_stderr():
+                gmsh.initialize()
+                gmsh.option.setNumber("General.Terminal", 0)
+                gmsh.open(file_path)
+                gmsh.model.mesh.generate(3)
+                output_file = os.path.join(self.save_path, os.path.splitext(os.path.basename(file_path))[0] + '.stl')
+                gmsh.write(output_file)
+        except Exception as e:
+            return str(e)
+        finally:
+            gmsh.finalize()
+
+    def gMesh(self, file_path):
+        result_queue = multiprocessing.Queue()
+        process = multiprocessing.Process(target=lambda q, path: q.put(self.gMesh_single(path)),
+                                          args=(result_queue, file_path))
+        process.start()
+
+        start_time = time.time()
+        while process.is_alive():
+            if time.time() - start_time > self.timeout:
+                # print(f"Mesh generation for {file_path} timed out after {timeout} seconds")
+                process.terminate()
+                process.join()
+                return False
+            time.sleep(0.1)
+
+        if not result_queue.empty():
+            result = result_queue.get()
+            if result is None:
+                # print(f"Successfully generated mesh for {file_path}")
+                return True
+            else:
+                # print(f"Mesh generation for {file_path} failed: {result}")
+                return False
+        else:
+            # print(f"Mesh generation for {file_path} failed with unknown error")
+            return False
+
+    def generate(self, parallel=False):
+        if self.method == self.METHOD_GMSH:
+            for file in tqdm(self.files):
+                if not self.gMesh(file):
+                    self.occMesh(file)
+        elif self.method == self.METHOD_OCC:
+            if parallel:
+                convert_iter = Pool(os.cpu_count()).imap(self.occMesh, self.files)
+                for _ in tqdm(convert_iter, total=len(self.files)):
+                    pass
+            else:
+                for file in tqdm(self.files):
+                    self.occMesh(file)
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
 
 
-def check_loop_edge(path):
-
-    with open(os.path.join('data_process/furniture_parsed', path), 'rb') as tf:
-        data = pickle.load(tf)
-
-    # ne*2, [(edge1, edge2, ...), ...], ne*2
-    edgeFace, faceEdge, edgeVert = data['edgeFace_adj'], data['faceEdge_adj'], data['edgeCorner_adj']
-
-    # """Check edgeVert"""
-    # sorted_edges = np.sort(edgeVert, axis=1)
-    # unique_edges = np.unique(sorted_edges, axis=0)
-    # if unique_edges.shape[0] != sorted_edges.shape[0]:
-    #     print("Two edges share the vertices")
-    # return
-
-    vertex_edge_dict = create_vertex_edge_adjacency(edgeVert)
-
-    """Check Loops"""
-    face_loop = []
-    for edges in faceEdge:
-        visited_edges = set()
-        loops = []
-
-        for start_edge in edges:
-            if start_edge in visited_edges:
-                continue
-
-            loop = []
-            current_edge = start_edge
-            current_vertex = edgeVert[current_edge][0]
-            while current_edge not in visited_edges:
-                visited_edges.add(current_edge)
-                loop.append(current_edge)
-
-                # find next vertex
-                if edgeVert[current_edge][0] == current_vertex:
-                    current_vertex = edgeVert[current_edge][1]
-                else:
-                    current_vertex = edgeVert[current_edge][0]
-
-                # find next edge
-                for e in vertex_edge_dict[current_vertex]:
-                    if e != current_edge and e in edges:
-                        current_edge = e
-                        break
-
-            loops.append(loop)
-
-        if len(loops) > 1:
-            print(loops)
-        face_loop.append(loops)
-
-    """Check Common Edges"""
-    for face1_edges, face2_edges in itertools.combinations(faceEdge, 2):
-        connected = are_faces_connected(face1_edges, face2_edges, edgeVert)
-        if not connected:
-            print(path)
-            return 0
-    return 1
-
-
-def are_faces_connected(face1_edges, face2_edges, edgeCorner):
+def are_faces_connected(face1_edges, face2_edges, edgeVert):
     # Find common edges between two faces
     edges = list(set(face1_edges) & set(face2_edges))
 
@@ -97,7 +152,7 @@ def are_faces_connected(face1_edges, face2_edges, edgeCorner):
         return True
 
     # Create a map of edge to its vertices
-    edge_vertices = {edge: set(edgeCorner[edge]) for edge in edges}
+    edge_vertices = {edge: set(edgeVert[edge]) for edge in edges}
 
     # Start from the first edge
     current_edge = edges[0]
@@ -388,7 +443,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     post_edges = []
     for idx, (surface, edge_incides) in enumerate(zip(recon_faces, FaceEdgeAdj)):
 
-        """Jing Test 2024/06/16"""
+        # """Jing Test 2024/06/16"""
         # print("number of edges:", len(edge_incides))
         # from OCC.Display.SimpleGui import init_display
         # display, start_display, add_menu, add_function_to_menu = init_display()
@@ -396,7 +451,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
         # for i in edge_incides:
         #     display.DisplayShape(edge_list[i], update=True, color='RED')  # 以红色显示边
         # start_display()
-        """*******************"""
+        # """*******************"""
 
         corner_indices = EdgeVertexAdj[edge_incides]
 
@@ -452,9 +507,9 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 
         # Inner wires
         inner_wires = []
-        for idx in inner_idx:
+        for idx_ in inner_idx:
             wire_builder = BRepBuilderAPI_MakeWire()
-            for edge_idx in loops[idx]:
+            for edge_idx in loops[idx_]:
                 wire_builder.Add(edge_list[edge_incides[edge_idx]])
             inner_wires.append(wire_builder.Wire())
 
@@ -463,15 +518,32 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
         for wire in inner_wires:
             face_builder.Add(wire)
         face_occ = face_builder.Shape()
+
         fix_wires(face_occ)
         add_pcurves_to_edges(face_occ)
         fix_wires(face_occ)
         face_occ = fix_face(face_occ)
+
+        # """Jing Test 2024/09/21"""
+        # analyzer = BRepCheck_Analyzer(face_occ)
+        # if not analyzer.IsValid():
+        #     fixer = ShapeFix_Shape(face_occ)
+        #     fixer.Perform()
+        #     print(idx, type(fixer.Shape()))
+        #     if isinstance(face_occ, TopoDS_Face):
+        #         face_occ = fixer.Shape()
+        #         explorer = TopExp_Explorer(face_occ, TopAbs_FACE)
+        #         while explorer.More():
+        #             post_faces.append(topods_Face(explorer.Current()))
+        #             explorer.Next()
+        #         continue
+
         post_faces.append(face_occ)
 
-        # """Jing Test 2024/06/16"""
+        # # """Jing Test 2024/06/16"""
         # from OCC.Core.TopExp import TopExp_Explorer
         # from OCC.Core.TopAbs import TopAbs_EDGE
+        # from OCC.Display.SimpleGui import init_display
         # display, start_display, add_menu, add_function_to_menu = init_display()
         # display.DisplayShape(face_occ, color='BLUE', update=True)
         # # 创建一个explorer来遍历面上的边缘(edges)
@@ -486,6 +558,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
         # # 开始交互式事件循环
         # print("number of edges:", ii)
         # start_display()
+        # print(111)
 
     # Sew faces into solid
     sewing = BRepBuilderAPI_Sewing()
@@ -506,18 +579,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 
 
 def main():
-    with open('data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
-        files = pickle.load(tf)['train']
-
-    convert_iter = Pool(os.cpu_count()).imap(check_loop_edge, files)
-    valid = 0
-    for status in tqdm(convert_iter, total=len(files)):
-        valid += status
-
-    print(valid)
-
-    for file in files:
-        check_loop_edge(file)
+    pass
 
 
 if __name__ == '__main__':

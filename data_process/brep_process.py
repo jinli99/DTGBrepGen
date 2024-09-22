@@ -316,12 +316,12 @@ def parse_solid(solid):
                 corner_unique = np.concatenate([corner_unique, corner_pnt.reshape(1, 3)], 0)
 
     # Edge-corner adjacency
-    edgeCorner_IncM = []
+    edgeVert_IncM = []
     for edge_corner in corner_wcs:
         start_corner_idx = np.where((corner_unique == edge_corner[0]).all(axis=1))[0].item()
         end_corner_idx = np.where((corner_unique == edge_corner[1]).all(axis=1))[0].item()
-        edgeCorner_IncM.append([start_corner_idx, end_corner_idx])
-    edgeCorner_IncM = np.array(edgeCorner_IncM)
+        edgeVert_IncM.append([start_corner_idx, end_corner_idx])
+    edgeVert_IncM = np.array(edgeVert_IncM)
 
     # Surface global bbox
     face_bboxes = []
@@ -345,7 +345,7 @@ def parse_solid(solid):
         'edge_ncs': edges_ncs.astype(np.float32),
         'corner_wcs': corner_wcs.astype(np.float32),
         'edgeFace_adj': edgeFace_IncM,
-        'edgeCorner_adj': edgeCorner_IncM,
+        'edgeVert_adj': edgeVert_IncM,
         'faceEdge_adj': faceEdge_IncM,
         'face_bbox_wcs': face_bboxes.astype(np.float32),
         'edge_bbox_wcs': edge_bboxes.astype(np.float32),
@@ -355,7 +355,7 @@ def parse_solid(solid):
     return data
 
 
-def count_fe_topo(face_edge):
+def count_fef_adj(face_edge):
     """
     Calculate the number of common edges between two adjacent faces
 
@@ -363,24 +363,24 @@ def count_fe_topo(face_edge):
     - face_edge (list): Face-Edge List
     
     Returns:
-    - fe_topo (numpy.ndarray): Number of common edges between any paired faces
+    - fef_adj (numpy.ndarray): Number of common edges between any paired faces
     """
     num_faces = len(face_edge)
-    fe_topo = np.zeros((num_faces, num_faces), dtype=int)
+    fef_adj = np.zeros((num_faces, num_faces), dtype=int)
     face_edge_sets = [set(fe) for fe in face_edge]
     for i in range(num_faces):
         for j in range(i+1, num_faces):
             common_elements = face_edge_sets[i].intersection(face_edge_sets[j])
             common_count = len(common_elements)
-            fe_topo[i, j] = common_count
-            fe_topo[j, i] = common_count
+            fef_adj[i, j] = common_count
+            fef_adj[j, i] = common_count
 
-    return fe_topo
+    return fef_adj
 
 
-def construct_vv_list(edgeCorner_adj):
+def construct_vv_list(edgeVert_adj):
 
-    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeCorner_adj)]
+    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj)]
 
     return vv_list
 
@@ -436,15 +436,15 @@ def process(step_folder, print_error=False):
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
 
-        fe_topo = count_fe_topo(data['faceEdge_adj'])
-        data['fe_topo'] = fe_topo
+        fef_adj = count_fef_adj(data['faceEdge_adj'])
+        data['fef_adj'] = fef_adj
 
-        vv_list = construct_vv_list(data['edgeCorner_adj'])
+        vv_list = construct_vv_list(data['edgeVert_adj'])
         data['vv_list'] = vv_list
 
         nv = data['corner_unique'].shape[0]
         vertex_edge_dict = {i: [] for i in range(nv)}
-        for edge_id, (v1, v2) in enumerate(data['edgeCorner_adj']):
+        for edge_id, (v1, v2) in enumerate(data['edgeVert_adj']):
             vertex_edge_dict[v1].append(edge_id)
             vertex_edge_dict[v2].append(edge_id)
 

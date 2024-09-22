@@ -5,19 +5,13 @@ import torch
 from tqdm import tqdm
 import pickle
 import numpy as np
-from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransformer, EdgeGeomTransformer,
-                   VertGeomTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastDecode)
-from diffusion import GraphDiffusion, DDPM
-from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, ncs2wcs, generate_random_string,
-                   remove_box_edge, construct_edgeFace_adj, construct_feTopo, remove_short_edge, reconstruct_vv_adj, construct_vertFace, construct_faceEdge, sort_bbox_multi)
-from dataFeature import GraphFeatures
+from model import (AutoencoderKLFastDecode, EdgeGeomTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastDecode)
+from geometry.diffusion import DDPM
+from utils import (pad_and_stack, generate_random_string, construct_faceEdge, sort_bbox_multi)
 from generate import get_edgeGeom
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from brep_functions import (joint_optimize, construct_brep)
+from brepBuild import (joint_optimize, construct_brep)
 from visualization import *
-import concurrent.futures
-from multiprocessing.pool import Pool
-import time
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -50,7 +44,7 @@ def get_topology(files, device, face_vae_encoder):
     for file in files:
         with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
             data = pickle.load(tf)
-        edgeVert_adj.append(data['edgeCorner_adj'])  # [ne*2, ...]
+        edgeVert_adj.append(data['edgeVert_adj'])  # [ne*2, ...]
         edgeFace_adj.append(torch.from_numpy(data['edgeFace_adj']).to(device))
         face_ncs.append(torch.from_numpy(data['face_ncs']).to(device))  # [nf*32*32*3, ...]
         face_bbox.append(torch.from_numpy(data['face_bbox_wcs']).to(device))  # [nf*6, ...]
@@ -102,18 +96,17 @@ def main():
 
     # Load pretrained surface vae (fast encode version)
     face_vae_encoder = AutoencoderKLFastEncode(in_channels=3,
-                                       out_channels=3,
-                                       down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
-                                                         'DownEncoderBlock2D', 'DownEncoderBlock2D'),
-                                       up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D',
-                                                       'UpDecoderBlock2D'),
-                                       block_out_channels=(128, 256, 512, 512),
-                                       layers_per_block=2,
-                                       act_fn='silu',
-                                       latent_channels=3,
-                                       norm_num_groups=32,
-                                       sample_size=512,
-                                       )
+                                               out_channels=3,
+                                               down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
+                                                                 'DownEncoderBlock2D', 'DownEncoderBlock2D'),
+                                               up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D',
+                                                               'UpDecoderBlock2D', 'UpDecoderBlock2D'),
+                                               block_out_channels=(128, 256, 512, 512),
+                                               layers_per_block=2,
+                                               act_fn='silu',
+                                               latent_channels=3,
+                                               norm_num_groups=32,
+                                               sample_size=512)
     face_vae_encoder.load_state_dict(torch.load(args.face_vae_path), strict=False)
     face_vae_encoder = face_vae_encoder.to(device).eval()
 
@@ -139,11 +132,11 @@ def main():
 
     ddpm = DDPM(500, device)
 
-    with open('batch_file_train.pkl', 'rb') as f:
+    with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
     # random.shuffle(batch_file)
 
-    b_each = 32
+    b_each = 1
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         """****************Brep Topology****************"""
@@ -205,6 +198,7 @@ def main():
             # joint_optimize:
             # numpy(nf*32*32*3), numpy(ne*32*3), numpy(nf*6), numpy(nv*3),
             # numpy(ne*2), len(list[[edge_id1, ...]...])=nf, int, int
+
             face_wcs, edge_wcs = joint_optimize(face_ncs.cpu().numpy(), edge_ncs.cpu().numpy(),
                                                 face_bbox_cad.cpu().numpy(), vert_geom_cad.cpu().numpy(),
                                                 edgeVert_cad, faceEdge_cad, len(edge_ncs), len(face_ncs))

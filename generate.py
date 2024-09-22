@@ -1,19 +1,16 @@
 import argparse
 import os
-import random
-import torch
 import pickle
-import numpy as np
 from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransformer, EdgeGeomTransformer,
                    VertGeomTransformer, AutoencoderKL1DFastDecode)
-from diffusion import GraphDiffusion, DDPM
-from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, ncs2wcs, generate_random_string,
-                   remove_box_edge, construct_edgeFace_adj, construct_feTopo, remove_short_edge, reconstruct_vv_adj,
+from geometry.diffusion import DDPM
+from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, generate_random_string,
+                   remove_box_edge, construct_feTopo, reconstruct_vv_adj,
                    construct_vertFace, construct_faceEdge, construct_faceVert, check_step_ok, sort_bbox_multi, construct_fvf_geom)
-from dataFeature import GraphFeatures
+from geometry.dataFeature import GraphFeatures
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from brep_functions import (
-    scale_surf, joint_optimize, construct_brep)
+from brepBuild import (
+    joint_optimize, construct_brep)
 from visualization import *
 
 import warnings
@@ -60,8 +57,8 @@ def get_topology(files, device):
     for file in files:
         with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
             data = pickle.load(tf)
-        e.append(data['fe_topo'])                    # [nf*nf, ***]
-        edgeVert_adj.append(data['edgeCorner_adj'])  # [ne*2, ...]
+        e.append(data['fef_adj'])                    # [nf*nf, ***]
+        edgeVert_adj.append(data['edgeVert_adj'])  # [ne*2, ...]
         vv_list.append(data['vv_list'])              # list[(v1, v2, edge_idx), ...]
         edgeFace_adj.append(torch.from_numpy(data['edgeFace_adj']).to(device))
 
@@ -177,11 +174,11 @@ def get_faceGeom(vertFace_adj, vert_geom, face_bbox, face_mask, extract_feat, dd
         faceVert_mask, assert_mask = pad_and_stack([i[1] for i in faceVert_geom], max_n=nf)  # b*nf*fv, b*nf
         assert torch.all(assert_mask == face_mask)
         faceVert_geom, _ = pad_and_stack([i[0] for i in faceVert_geom], max_n=nf)  # b*nf*fv*3
-        fe_topo = [pad_zero(construct_feTopo(i).cpu().numpy(), max_len=face_mask.shape[1], dim=1)[0] for i in
+        fef_adj = [pad_zero(construct_feTopo(i).cpu().numpy(), max_len=face_mask.shape[1], dim=1)[0] for i in
                    edgeFace_adj]  # list[shape:nf*nf, ...]
-        fe_topo = torch.from_numpy(np.stack(fe_topo)).to(device)  # b*nf*nf
-        x = torch.randn((fe_topo.shape[0], fe_topo.shape[1], 48), device=device)  # b*nf*48
-        e = torch.nn.functional.one_hot(fe_topo, num_classes=5)  # b*n*n*m
+        fef_adj = torch.from_numpy(np.stack(fef_adj)).to(device)  # b*nf*nf
+        x = torch.randn((fef_adj.shape[0], fef_adj.shape[1], 48), device=device)  # b*nf*48
+        e = torch.nn.functional.one_hot(fef_adj, num_classes=5)  # b*n*n*m
         x, e = xe_mask(x=x, e=e, node_mask=face_mask)  # b*nf*48, b*n*n*m
         feat = extract_feat(e, face_mask)
         for t in range(ddpm.T - 1, -1, -1):
@@ -314,11 +311,7 @@ def main():
     faceBbox_model = faceBbox_model.to(device).eval()
 
     # Initial FaceGeomTransformer
-    faceGeom_model = FaceGeomTransformer(n_layers=8, input_dims={'x': 54, 'e': 5, 'y': 12},
-                                         hidden_mlp_dims=hyper_params['hidden_mlp_dims'],
-                                         hidden_dims=hyper_params['hidden_dims'],
-                                         output_dims={'x': 48, 'e': 5, 'y': 0},
-                                         act_fn_in=torch.nn.ReLU(), act_fn_out=torch.nn.ReLU())
+    faceGeom_model = FaceGeomTransformer(n_layers=8, face_geom_dim=48)
     faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
     faceGeom_model = faceGeom_model.to(device).eval()
 
@@ -342,7 +335,7 @@ def main():
     # batch_file = get_ok_step(50, mode='test')
     # with open('batch_file_test.pkl', 'wb') as f:
     #     pickle.dump(batch_file, f)
-
+    # return
     with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 

@@ -404,13 +404,147 @@ def draw_points(points):
 
     fig = go.Figure(data=[scatter])
 
-    fig.update_layout(
-        scene=dict(
-            xaxis_title='X Axis',
-            yaxis_title='Y Axis',
-            zaxis_title='Z Axis'
-        ),
-        title="3D Scatter Plot"
-    )
+    # fig.update_layout(
+    #     scene=dict(
+    #         xaxis_title='X Axis',
+    #         yaxis_title='Y Axis',
+    #         zaxis_title='Z Axis'
+    #     ),
+    #     title="3D Scatter Plot"
+    # )
+
+    # Set the layout
+    fig.update_layout(scene=dict(
+        xaxis=dict(nticks=10, range=[-1, 1]),
+        yaxis=dict(nticks=10, range=[-1, 1]),
+        zaxis=dict(nticks=10, range=[-1, 1]),
+        aspectratio=dict(x=1, y=1, z=1),
+        aspectmode='cube'
+    ))
 
     pyo.plot(fig)
+
+
+"""Visulize Step File"""
+# from OCC.Display.SimpleGui import init_display
+# from OCC.Core.STEPControl import STEPControl_Reader
+# from OCC.Core.IFSelect import IFSelect_RetDone
+#
+# # 初始化显示器
+# display, start_display, add_menu, add_function_to_menu = init_display()
+#
+# # 创建STEP读取器
+# step_reader = STEPControl_Reader()
+#
+# # 加载STEP文件
+# step_file = 'samples/test_ef/eval/test_ef_05/2zPAZRfIxsTyvQX_0.step'  # 替换为你要加载的STEP文件路径
+# status = step_reader.ReadFile(step_file)
+#
+# # 确保文件成功读取
+# if status == IFSelect_RetDone:
+#     step_reader.TransferRoots()
+#     shape = step_reader.OneShape()
+#     display.DisplayShape(shape, update=True)
+# else:
+#     print("Error: Failed to read the STEP file.")
+#
+# # 启动显示窗口
+# start_display()
+
+
+"""Visulize Stl File"""
+# import open3d as o3d
+# import numpy as np
+#
+# # STL文件路径列表
+# stl_files = [
+#     "samples/test_ef/eval/test_ef_05/G3TiZfECHELc9ZB_32.stl",
+#     "samples/test_ef/eval/test_ef_05/gQ5rsnPxtdMNflY_0.stl",
+#     "samples/test_ef/eval/test_ef_05/IX0hcbO4Cr5FINR_0.stl",
+#     "samples/test_ef/eval/test_ef_05/jVzYQr87kjd1f8s_32.stl",
+#     "samples/test_ef/eval/test_ef_05/ljSfAG0eoE8h6dH_32.stl",
+#     "samples/test_ef/eval/test_ef_05/Nqv2BNc44CNv54p_0.stl",
+#     "samples/test_ef/eval/test_ef_05/OwdymeQl0n9PQ6q_0.stl",
+#     "samples/test_ef/eval/test_ef_05/RBlEcjo633Jpq4D_0.stl",
+#     "samples/test_ef/eval/test_ef_05/RLiIekLcTv9Il6j_32.stl",
+#     "samples/test_ef/eval/test_ef_05/Ufefqk1elO5OD7X_0.stl",
+#     "samples/test_ef/eval/test_ef_05/YCNm7Zcm10ZlKdQ_32.stl",
+#     "samples/test_ef/train/test_ef_05/0f2ea4fLx5GRzOF_64.stl",
+#     "samples/test_ef/train/test_ef_05/0FsG4x3yCCAnp82_640.stl",
+#     "samples/test_ef/train/test_ef_05/0yyBxV2LarXO8XX_224.stl",
+#     "samples/test_ef/train/test_ef_05/1sFYlP8uebsVs1C_480.stl",
+#     "samples/test_ef/train/test_ef_05/1wE8DnBDsecF3IW_992.stl",
+#     "samples/test_ef/train/test_ef_05/1WTtR4ClGCpirXN_288.stl",
+#     "samples/test_ef/train/test_ef_05/2AZJ0IJtunhvUey_864.stl",
+#     "samples/test_ef/train/test_ef_05/2HPP16aMUh9wy9Q_864.stl",
+#     "samples/test_ef/train/test_ef_05/2qhMJYZ7gOHnpnp_576.stl",
+#     "samples/test_ef/train/test_ef_05/3BdLUoxPOT1SZGL_608.stl"
+# ]
+#
+# # 平移向量列表，每个物体将沿X轴依次平移
+# translations = 1.5*np.array([
+#     [0, 0, 0],  # 第一个物体不平移
+#     [2.3, 0, 0],  # 第二个物体沿X轴平移2个单位
+#     [4, 0, 0],  # 第三个物体沿X轴平移4个单位
+#     [6, 0, 0],  # 第四个物体沿X轴平移6个单位
+#     [8, 0, 0],  # 依次类推
+#     [10, 0, 0],
+#     [12, 0, 0],
+#     [0, 2, 0],  # 第一个物体不平移
+#     [2.2, 2, 0],  # 第二个物体沿X轴平移2个单位
+#     [4, 2, 0],  # 第三个物体沿X轴平移4个单位
+#     [6.2, 2, 0],  # 第四个物体沿X轴平移6个单位
+#     [8, 2, 0],  # 依次类推
+#     [10, 2, 0],
+#     [12.5, 2, 0],
+#     [0, 4, 0],  # 第一个物体不平移
+#     [2, 4, 0],  # 第二个物体沿X轴平移2个单位
+#     [4, 4, 0],  # 第三个物体沿X轴平移4个单位
+#     [6, 4, 0],  # 第四个物体沿X轴平移6个单位
+#     [8, 4, 0],  # 依次类推
+#     [10, 4, 0],
+#     [11.5, 4, 0],
+# ])
+#
+# # 创建一个可视化窗口
+# vis = o3d.visualization.Visualizer()
+# vis.create_window()
+#
+# # 设置背景为白色
+# opt = vis.get_render_option()
+# opt.background_color = np.asarray([1, 1, 1])  # RGB: 白色
+#
+# # 生成绕z轴逆时针旋转90度的旋转矩阵
+# rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, np.pi / 2])
+#
+# # 循环读取并添加每个STL文件到场景中
+# for i, stl_file in enumerate(stl_files):
+#     # 读取STL文件
+#     mesh = o3d.io.read_triangle_mesh(stl_file)
+#
+#     # 确保法向量已计算
+#     mesh.compute_vertex_normals()
+#
+#     # 为每个网格设置相同的灰色
+#     mesh.paint_uniform_color(np.random.rand(3))
+#
+#     # 对物体进行平移和旋转
+#     translation = translations[i]
+#     mesh.translate(translation)
+#     mesh.rotate(rotation_matrix)
+#
+#     # 添加网格到场景
+#     vis.add_geometry(mesh)
+#
+# # 更新并显示
+# vis.poll_events()
+# vis.update_renderer()
+#
+# # 运行可视化
+# vis.run()
+#
+# # 销毁窗口
+# vis.destroy_window()
+
+
+
