@@ -11,7 +11,6 @@ from OCC.Core.TopAbs import TopAbs_WIRE, TopAbs_SHELL, TopAbs_FACE, TopAbs_EDGE
 from OCC.Core.BRep import BRep_Tool
 from OCC.Core.ShapeFix import ShapeFix_Wire
 from utils import load_data_with_prefix
-from brepBuild import Brep2Mesh
 
 
 def check_brep_validity(step_file_path):
@@ -172,17 +171,7 @@ class ValidMetric:
 
 def main():
 
-    for idx in ['02', '03', '04']:
-        path = 'train_' + idx
-        xx = Brep2Mesh(input_path='samples/test_ef/train/test_ef_'+idx, save_path=path)
-        xx.generate()
-
-    for idx in ['01', '02', '03', '04', '05']:
-        path = 'eval_' + idx
-        xx = Brep2Mesh(input_path='samples/test_ef/eval/test_ef_'+idx, save_path=path)
-        xx.generate()
-
-    xx = ValidMetric(input_path='gmsh')
+    xx = ValidMetric(input_path='/home/jing/PythonProjects/BrepGDM/samples/jing')
     xx.compute_metric(parallel=True)
 
 

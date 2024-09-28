@@ -689,29 +689,10 @@ class FaceGeomTrainer:
         self.z_scaled = args.z_scaled
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.diffusion = DDPM(args.timesteps, self.device)
-        self.extract_feat = GraphFeatures(args.extract_type, args.max_face)
         self.edge_classes = args.edge_classes
 
-        # Load pretrained surface vae (fast encode version)
-        face_vae = AutoencoderKLFastEncode(in_channels=3,
-                                           out_channels=3,
-                                           down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
-                                                             'DownEncoderBlock2D', 'DownEncoderBlock2D'),
-                                           up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D',
-                                                           'UpDecoderBlock2D'),
-                                           block_out_channels=(128, 256, 512, 512),
-                                           layers_per_block=2,
-                                           act_fn='silu',
-                                           latent_channels=3,
-                                           norm_num_groups=32,
-                                           sample_size=512,
-                                           )
-        face_vae.load_state_dict(torch.load(args.face_vae), strict=False)
-        face_vae = nn.DataParallel(face_vae)    # distributed inference
-        self.face_vae = face_vae.to(self.device).eval()
-
         # Initialize network
-        model = FaceGeomTransformer(n_layers=8, face_geom_dim=48)
+        model = FaceGeomTransformer(n_layers=12, face_geom_dim=48)
         model = nn.DataParallel(model)    # distributed training
         self.model = model.to(self.device).train()
 
@@ -750,39 +731,36 @@ class FaceGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nf*32*32*3, b*nf*6, b*nf*fv*3, b*1, b*nf*1, b*1
-                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask, class_label = data
+                    # b*nf*48, b*nf*6, b*nf*fv*3, b*nf*fe*12, b*1, b*nf*1, b*fe*1, b*1
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask = data
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask = data
                     class_label = None
-                nf = mask.max()
+                nf = face_mask.max()
                 fv = faceVert_mask.max()
-                face_ncs = face_ncs[:, :nf, ...]                     # b*nf*32*32*3
+                fe = faceEdge_mask.max()
+                face_geom = face_geom[:, :nf, ...]                   # b*nf*48
                 face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
                 faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
-                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf
-                b = face_bbox.shape[0]
+                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf*1
+                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]      # b*nf*fe*12
+                faceEdge_mask = faceEdge_mask[:, :nf, ...]           # b*nf*1
 
-                mask = make_mask(mask, nf)                           # b*nf
+                face_mask = make_mask(face_mask, nf)                 # b*nf
                 faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
+                faceEdge_mask = make_mask(faceEdge_mask, fe)         # b*nf*fe
 
-                # Pass through surface VAE to sample latent z
-                with torch.no_grad():
-                    face_uv = face_ncs.flatten(0, 1).permute(0, 3, 1, 2)
-                    face_latent = self.face_vae(face_uv)
-                    face_latent = face_latent.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*nf*16*3
-
-                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*nf*48
-                x_0, _ = xe_mask(x=x_0, node_mask=mask)
+                x_0 = face_geom * self.z_scaled                      # b*nf*48
+                x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
                 self.optimizer.zero_grad()  # zero gradient
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, mask)
+                noise_data = self.diffusion.add_noise(x_0, face_mask)
                 x_t, t = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nf*48, b*1
 
                 # Predict noise
-                pred_noise = self.model(x_t, face_bbox, faceVert_geom, mask, faceVert_mask, t)   # b*n*48
+                pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, t)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -790,7 +768,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[mask], noise_data['noise'][mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
 
                 # Update model
                 self.scaler.scale(face_mse_loss).backward()
@@ -824,43 +802,40 @@ class FaceGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nf*32*32*3, b*nf*6, b*nf*fv*3, b*1, b*nf*1, b*1
-                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask, class_label = data
+                    # b*nf*48, b*nf*6, b*nf*fv*3, b*nf*fe*12, b*1, b*nf*1, b*fe*1, b*1
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label = data
                 else:
-                    face_ncs, face_bbox, faceVert_geom, mask, faceVert_mask = data
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask = data
                     class_label = None
-                nf = mask.max()
+                nf = face_mask.max()
                 fv = faceVert_mask.max()
-                face_ncs = face_ncs[:, :nf, ...]                     # b*nf*32*32*3
+                fe = faceEdge_mask.max()
+                face_geom = face_geom[:, :nf, ...]                   # b*nf*48
                 face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
                 faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
                 faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf*1
-                b = face_bbox.shape[0]
+                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]      # b*nf*fe*12
+                faceEdge_mask = faceEdge_mask[:, :nf, ...]           # b*nf*1
 
-                mask = make_mask(mask, nf)                           # b*nf
+                face_mask = make_mask(face_mask, nf)                 # b*nf
                 faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
+                faceEdge_mask = make_mask(faceEdge_mask, fe)         # b*nf*fe
 
-                # Pass through surface VAE to sample latent z
-                with torch.no_grad():
-                    face_uv = face_ncs.flatten(0, 1).permute(0, 3, 1, 2)
-                    face_latent = self.face_vae(face_uv)
-                    face_latent = face_latent.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2)   # b*n*16*3
-
-                x_0 = face_latent.flatten(-2, -1) * self.z_scaled   # rescaled the latent z    # b*nf*48
-                x_0, _ = xe_mask(x=x_0, node_mask=mask)
+                x_0 = face_geom * self.z_scaled                      # b*nf*48
+                x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
             total_count += 1
 
             for idx, step in enumerate([10, 50, 100, 200, 500]):
                 # Evaluate at timestep
-                timesteps = torch.randint(step - 1, step, (b, 1), device=self.device).long()  # [batch, 1]
+                timesteps = torch.randint(step - 1, step, (x_0.shape[0], 1), device=self.device).long()  # b*1
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(x_0, mask, t=timesteps)
-                x_t, t = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])  # b*nf*48, b*1
+                noise_data = self.diffusion.add_noise(x_0, face_mask, t=timesteps)
+                x_t, t = noise_data['x_t'], self.diffusion.normalize_t(noise_data['t'])               # b*nf*48, b*1
 
                 # Predict noise
-                pred_noise = self.model(x_t, face_bbox, faceVert_geom, mask, faceVert_mask, t)   # b*n*48
+                pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, t)   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -868,7 +843,7 @@ class FaceGeomTrainer:
                     assert False
 
                 # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[mask], noise_data['noise'][mask])
+                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise_data['noise'][face_mask])
 
                 total_loss[idx] += face_mse_loss
 
@@ -900,43 +875,9 @@ class EdgeGeomTrainer:
         self.diffusion = DDPM(args.timesteps, self.device)
 
         # Initialize network
-
-        model = EdgeGeomTransformer(n_layers=8, face_geom_dim=48, edge_geom_dim=12)
+        model = EdgeGeomTransformer(n_layers=12, face_geom_dim=48, edge_geom_dim=12)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
-
-        # Load pretrained surface vae (fast encode version)
-        face_vae = AutoencoderKLFastEncode(in_channels=3,
-                                           out_channels=3,
-                                           down_block_types=('DownEncoderBlock2D', 'DownEncoderBlock2D',
-                                                             'DownEncoderBlock2D', 'DownEncoderBlock2D'),
-                                           up_block_types=('UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D',
-                                                           'UpDecoderBlock2D'),
-                                           block_out_channels=(128, 256, 512, 512),
-                                           layers_per_block=2,
-                                           act_fn='silu',
-                                           latent_channels=3,
-                                           norm_num_groups=32,
-                                           sample_size=512,)
-        face_vae.load_state_dict(torch.load(args.face_vae), strict=False)
-        face_vae = nn.DataParallel(face_vae)  # distributed inference
-        self.face_vae = face_vae.to(self.device).eval()
-
-        # Load pretrained edge vae (fast encode version)
-        edge_vae = AutoencoderKL1DFastEncode(
-            in_channels=3,
-            out_channels=3,
-            down_block_types=('DownBlock1D', 'DownBlock1D', 'DownBlock1D'),
-            up_block_types=('UpBlock1D', 'UpBlock1D', 'UpBlock1D'),
-            block_out_channels=(128, 256, 512),
-            layers_per_block=2,
-            act_fn='silu',
-            latent_channels=3,
-            norm_num_groups=32,
-            sample_size=512)
-        edge_vae.load_state_dict(torch.load(args.edge_vae), strict=False)
-        edge_vae = nn.DataParallel(edge_vae)  # distributed inference
-        self.edge_vae = edge_vae.to(self.device).eval()
 
         # Initialize optimizer
         self.network_params = list(self.model.parameters())
@@ -976,52 +917,33 @@ class EdgeGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
+                    edge_geom, edgeFace_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
                 else:
-                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edgeVert_geom, edge_mask = data
+                    edge_geom, edgeFace_geom, edgeFace_bbox, edgeVert_geom, edge_mask = data
                     class_label = None
 
-                ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
-                edge_ncs = edge_ncs[:, :ne, ...]               # b*ne*32*3
-                edgeFace_ncs = edgeFace_ncs[:, :ne, ...]       # b*ne*2*32*32*3
+                ne = edge_mask.max().cpu().item() + 1
+                edge_geom = edge_geom[:, :ne, ...]             # b*ne*12
+                edgeFace_geom = edgeFace_geom[:, :ne, ...]     # b*ne*2*48
                 edgeFace_bbox = edgeFace_bbox[:, :ne, ...]     # b*ne*2*6
-                edgeVert_geom = edgeVert_geom[:, :ne, ...]             # b*ne*2*3
-                edge_mask = edge_mask[:, :ne]                  # b*ne
-
-                b = edge_ncs.shape[0]
-
-                # Pass through surface/edge VAE to sample latent z
-                with torch.no_grad():
-                    face_uv = edgeFace_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
-                    face_z = self.face_vae(face_uv)
-                    face_z = face_z.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2).unflatten(1, (ne, 2))   # b*ne*2*16*3
-
-                    edge_u = edge_ncs.flatten(0, 1).permute(0, 2, 1)
-                    edge_z = self.edge_vae(edge_u)
-                    edge_z = edge_z.unflatten(0, (b, ne)).permute(0, 1, 3, 2)   # b*ne*4*3
+                edgeVert_geom = edgeVert_geom[:, :ne, ...]     # b*ne*2*3
+                edge_mask = make_mask(edge_mask, ne)           # b*ne
 
                 # b*ne*2*(48+6)
-                edgeFace_info = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edgeFace_bbox), dim=-1)
-                e_0 = edge_z.flatten(-2, -1) * self.z_scaled       # b*ne*12
-
-                # Augment the surface position and latent (see https://arxiv.org/abs/2106.15282)
-                conditions = [edgeFace_info, edgeVert_geom]
-                aug_data = []
-                for cond in conditions:
-                    aug_timesteps = torch.randint(0, 7, (b, 1), device=self.device).long()
-                    noise_data = self.diffusion.add_noise(cond, edge_mask, t=aug_timesteps)
-                    aug_data.append(noise_data['x_t'])
-                edgeFace_info, edgeVert_geom = aug_data[0], aug_data[1]
+                edgeFace_info = torch.cat((edgeFace_geom, edgeFace_bbox), dim=-1)
+                x_0 = edge_geom * self.z_scaled                # b*ne*12
+                x_0, _ = xe_mask(x=x_0, node_mask=edge_mask)
 
                 # Zero gradient
                 self.optimizer.zero_grad()
 
                 # Add noise
-                noise_data = self.diffusion.add_noise(e_0, edge_mask)
-                e_t, noise, t = noise_data['x_t'], noise_data['noise'], self.diffusion.normalize_t(noise_data['t'])   # b*ne*12, b*ne*12, b*1
+                noise_data = self.diffusion.add_noise(x_0, edge_mask)
+                # b*ne*12, b*ne*12, b*1
+                x_t, noise, t = noise_data['x_t'], noise_data['noise'], self.diffusion.normalize_t(noise_data['t'])
 
                 # Predict noise
-                pred_noise = self.model(e_t, edgeFace_info, edgeVert_geom, edge_mask, t)    # b*ne*12
+                pred_noise = self.model(x_t, edgeFace_info, edgeVert_geom, edge_mask, t)    # b*ne*12
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -1066,46 +988,36 @@ class EdgeGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edge_vert, edge_mask, class_label = data
+                    edge_geom, edgeFace_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
                 else:
-                    edge_ncs, edgeFace_ncs, edgeFace_bbox, edge_vert, edge_mask = data
+                    edge_geom, edgeFace_geom, edgeFace_bbox, edgeVert_geom, edge_mask = data
                     class_label = None
 
-                ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
-                edge_ncs = edge_ncs[:, :ne, ...]               # b*ne*32*3
-                edgeFace_ncs = edgeFace_ncs[:, :ne, ...]     # b*ne*2*32*32*3
-                edgeFace_bbox = edgeFace_bbox[:, :ne, ...]   # b*ne*2*6
-                edge_vert = edge_vert[:, :ne, ...]         # b*ne*2*3
-                edge_mask = edge_mask[:, :ne]                  # b*ne
-
-                b = edge_ncs.shape[0]
-
-                # Pass through surface/edge VAE to sample latent z
-                face_uv = edgeFace_ncs.flatten(1, 2).flatten(0, 1).permute(0, 3, 1, 2)
-                face_z = self.face_vae(face_uv)
-                face_z = face_z.unflatten(0, (b, -1)).flatten(-2, -1).permute(0, 1, 3, 2).unflatten(1, (ne, 2))   # b*ne*2*16*3
-
-                edge_u = edge_ncs.flatten(0, 1).permute(0, 2, 1)
-                edge_z = self.edge_vae(edge_u)
-                edge_z = edge_z.unflatten(0, (b, ne)).permute(0, 1, 3, 2)   # b*ne*4*3
+                ne = edge_mask.max().cpu().item() + 1
+                edge_geom = edge_geom[:, :ne, ...]             # b*ne*12
+                edgeFace_geom = edgeFace_geom[:, :ne, ...]     # b*ne*2*48
+                edgeFace_bbox = edgeFace_bbox[:, :ne, ...]     # b*ne*2*6
+                edgeVert_geom = edgeVert_geom[:, :ne, ...]     # b*ne*2*3
+                edge_mask = make_mask(edge_mask, ne)           # b*ne
 
                 # b*ne*2*(48+6)
-                edgeFace_info = torch.cat((face_z.flatten(-2, -1) * self.z_scaled, edgeFace_bbox), dim=-1)
-                e_0 = edge_z.flatten(-2, -1) * self.z_scaled       # b*ne*12
+                edgeFace_info = torch.cat((edgeFace_geom, edgeFace_bbox), dim=-1)
+                x_0 = edge_geom * self.z_scaled                # b*ne*12
+                x_0, _ = xe_mask(x=x_0, node_mask=edge_mask)
 
                 total_count += 1
 
                 for idx, step in enumerate([10, 50, 100, 200, 500]):
                     # Evaluate at timestep
-                    timesteps = torch.randint(step - 1, step, (b, 1), device=self.device).long()  # [batch, 1]
+                    timesteps = torch.randint(step - 1, step, (edge_geom.shape[0], 1), device=self.device).long()  # b*1
 
                     # Add noise
-                    noise_data = self.diffusion.add_noise(e_0, edge_mask, t=timesteps)
-                    e_t, noise, t = noise_data['x_t'], noise_data['noise'], self.diffusion.normalize_t(
-                        noise_data['t'])     # b*ne*12, b*ne*18, b*1
+                    noise_data = self.diffusion.add_noise(x_0, edge_mask, t=timesteps)
+                    # b*ne*12, b*ne*12, b*1
+                    x_t, noise, t = noise_data['x_t'], noise_data['noise'], self.diffusion.normalize_t(noise_data['t'])
 
                     # Predict noise
-                    pred_noise = self.model(e_t, edgeFace_info, edge_vert, edge_mask, t)  # b*ne*12
+                    pred_noise = self.model(x_t, edgeFace_info, edgeVert_geom, edge_mask, t)  # b*ne*12
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")

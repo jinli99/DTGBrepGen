@@ -6,7 +6,7 @@ import numpy as np
 import random
 from tqdm import tqdm
 from multiprocessing.pool import Pool
-from utils import pad_and_stack, pad_zero, reconstruct_vv_adj, construct_faceVert, sort_bbox_multi, construct_fvf_geom
+from utils import pad_and_stack, pad_zero, sort_bbox_multi, check_step_ok
 
 
 # furniture class labels
@@ -74,66 +74,8 @@ def filter_data(data):
     # Load data
     with open(data_path, "rb") as tf:
         data = pickle.load(tf)
-    faceEdge_adj, face_bbox, edge_bbox, fef_adj = (data['faceEdge_adj'], data['face_bbox_wcs'],
-                                                   data['edge_bbox_wcs'], data['fef_adj'])
-
-    # Check Topology
-    edgeVert_adj = data['edgeVert_adj']
-    for face_edges in faceEdge_adj:
-        num_edges = len(face_edges)
-        vertices = set()
-        for edge_id in face_edges:
-            vertices.update(edgeVert_adj[edge_id])
-        num_vertices = len(vertices)
-        if num_edges != num_vertices:
-            return None, None
-
-    # Skip over max edge-classes
-    if fef_adj.max() >= edge_classes:
+    if not check_step_ok(data, max_face=max_face, max_edge=max_edge, edge_classes=edge_classes):
         return None, None
-
-    # Skip over max size data
-    if len(face_bbox) > max_face:
-        return None, None
-
-    for face_edges in faceEdge_adj:
-        if len(face_edges) > max_edge:
-            return None, None
-
-    # Skip faces too close to each other
-    face_bbox = face_bbox * scaled_value  # make bbox difference larger
-
-    _face_bbox_ = face_bbox.reshape(len(face_bbox), 2, 3)
-    non_repeat = _face_bbox_[:1]
-    for bbox in _face_bbox_:
-        diff = np.max(np.max(np.abs(non_repeat - bbox), -1), -1)
-        same = diff < threshold_value
-        if same.sum() >= 1:
-            continue  # repeat value
-        else:
-            non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
-    if len(non_repeat) != len(_face_bbox_):
-        return None, None
-
-    # Skip edges too close to each other
-    se_bbox = []
-    for adj in faceEdge_adj:
-        if len(edge_bbox[adj]) == 0:
-            return None, None
-        se_bbox.append(edge_bbox[adj] * scaled_value)
-
-    for bbb in se_bbox:
-        _edge_bbox_ = bbb.reshape(len(bbb), 2, 3)
-        non_repeat = _edge_bbox_[:1]
-        for bbox in _edge_bbox_:
-            diff = np.max(np.max(np.abs(non_repeat - bbox), -1), -1)
-            same = diff < threshold_value
-            if same.sum() >= 1:
-                continue  # repeat value
-            else:
-                non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
-        if len(non_repeat) != len(_edge_bbox_):
-            return None, None
     return data_path, data_class
 
 
@@ -332,81 +274,6 @@ class FaceBboxData(torch.utils.data.Dataset):
             )
 
 
-class FaceGeomData(torch.utils.data.Dataset):
-    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
-        self.max_face = args.max_face
-        self.max_edge = args.max_edge
-        self.bbox_scaled = args.bbox_scaled
-        self.aug = aug
-        self.data = []
-        self.edge_classes = args.edge_classes
-        # Load data
-        self.data = load_data(input_data, input_list, validate, args)
-        # Inflate furniture x50 times for training
-        # if len(self.data) < 2000 and not validate:
-        #     self.data = self.data * 50
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, index):
-        # Load data
-        data_class = None
-        if isinstance(self.data[index], tuple):
-            data_path, data_class = self.data[index]
-        else:
-            data_path = self.data[index]
-
-        with open(data_path, "rb") as tf:
-            data = pickle.load(tf)
-
-        face_ncs, face_bbox, vert_geom, faceEdge_adj, edgeVert_adj = (
-            data['face_ncs'],          # nf*32*32*3
-            data['face_bbox_wcs'],     # nf*6
-            data['corner_unique'],     # nv*3
-            data['faceEdge_adj'],      # [[e1, e2, ...], ...]
-            data['edgeVert_adj']     # ne*2
-        )
-
-        # Increase value range
-        face_bbox = sort_bbox_multi(face_bbox)
-        face_bbox *= self.bbox_scaled    # nf*6
-        vert_geom *= self.bbox_scaled    # nv*3
-        faceVert_geom = [vert_geom[np.unique(edgeVert_adj[i].flatten())] for i in faceEdge_adj]      # [fv*3, ...]
-
-        # Randomly shuffle the sequence
-        random_indices = np.random.permutation(face_bbox.shape[0])
-        face_ncs = face_ncs[random_indices]
-        face_bbox = face_bbox[random_indices]
-        faceVert_geom = [faceVert_geom[i] for i in random_indices]
-
-        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face, dim=0)                     # max_faces*6, max_faces
-        mask = mask.sum(keepdims=True)                                                          # 1
-        faceVert_geom, faceVert_mask = pad_and_stack(faceVert_geom, max_n=self.max_edge)        # nf*fv*3, nf*fv
-        faceVert_mask = faceVert_mask.sum(-1, keepdims=True)                                    # nf*1
-        assert mask == data['face_ncs'].shape[0]
-        face_ncs, _ = pad_zero(face_ncs, max_len=self.max_face, dim=0)                          # max_faces*32*32*3
-        faceVert_geom, _ = pad_zero(faceVert_geom, max_len=self.max_face, dim=0)                # max_faces*fv*3
-        faceVert_mask, _ = pad_zero(faceVert_mask, max_len=self.max_face, dim=0)                # max_faces*1
-        if data_class is not None:
-            return (
-                torch.FloatTensor(face_ncs),           # max_faces*32*32*3
-                torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
-                torch.from_numpy(mask),                # 1
-                torch.from_numpy(faceVert_mask),       # max_faces*1
-                torch.LongTensor([data_class + 1])     # add 1, class 0 = un-cond (furniture)
-            )
-        else:
-            return (
-                torch.FloatTensor(face_ncs),           # max_faces*32*32*3
-                torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
-                torch.from_numpy(np.array([mask])),    # 1
-                torch.from_numpy(faceVert_mask)        # max_faces*1, un-cond deepcad/abc
-            )
-
-
 class VertGeomData(torch.utils.data.Dataset):
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         self.max_face = args.max_face
@@ -493,21 +360,16 @@ class VertGeomData(torch.utils.data.Dataset):
             )
 
 
-class EdgeGeomData(torch.utils.data.Dataset):
-    """ Edge Feature Dataloader """
-
+class FaceGeomData(torch.utils.data.Dataset):
     def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
-        self.max_num_edge = args.max_num_edge
         self.bbox_scaled = args.bbox_scaled
         self.aug = aug
         self.data = []
+        self.edge_classes = args.edge_classes
         # Load data
         self.data = load_data(input_data, input_list, validate, args)
-        # Inflate furniture x50 times for training
-        # if len(self.data) < 2000 and not validate:
-        #     self.data = self.data * 25
 
     def __len__(self):
         return len(self.data)
@@ -523,50 +385,139 @@ class EdgeGeomData(torch.utils.data.Dataset):
         with open(data_path, "rb") as tf:
             data = pickle.load(tf)
 
-        face_ncs, edge_ncs, edgeFace_adj, face_bbox, vert_geom, edgeVert_adj = (
-            data['face_ncs'],         # nf*32*32*3
-            data['edge_ncs'],         # ne*32*3
-            data['edgeFace_adj'],     # ne*2
-            data['face_bbox_wcs'],    # nf*6
-            data['corner_unique'],    # nv*3
-            data['edgeVert_adj']    # ne*2
+        face_ctrs, face_bbox, edge_ctrs, vert_geom, faceEdge_adj, edgeVert_adj = (
+            data['face_ctrs'].reshape(-1, 48),         # nf*(16*3)
+            data['face_bbox_wcs'],                     # nf*6
+            data['edge_ctrs'].reshape(-1, 12),         # ne*12
+            data['vert_wcs'],                          # nv*3
+            data['faceEdge_adj'],                      # [[e1, e2, ...], ...]
+            data['edgeVert_adj']                       # ne*2
         )
 
         # Increase value range
         face_bbox = sort_bbox_multi(face_bbox)
-        face_bbox = face_bbox * self.bbox_scaled     # nf*32*32*3
-        vert_geom *= self.bbox_scaled                # nv*3
+        face_bbox *= self.bbox_scaled                                                                # nf*6
+        face_ctrs *= self.bbox_scaled                                                                # nf*48
+        edge_ctrs *= self.bbox_scaled                                                                # ne*12
+        vert_geom *= self.bbox_scaled                                                                # nv*3
+        faceEdge_geom = [edge_ctrs[i] for i in faceEdge_adj]                                         # [fe*12, ...]
+        faceVert_geom = [vert_geom[np.unique(edgeVert_adj[i].flatten())] for i in faceEdge_adj]      # [fv*3, ...]
 
-        edgeFace_ncs = face_ncs[edgeFace_adj]        # ne*2*32*32*3
-        edgeFace_bbox = face_bbox[edgeFace_adj]      # ne*2*6
-        edgeVert_geom = vert_geom[edgeVert_adj]      # ne*2*3
+        # Randomly shuffle the sequence
+        random_indices = np.random.permutation(face_bbox.shape[0])
+        face_geom = face_ctrs[random_indices]
+        face_bbox = face_bbox[random_indices]
+        faceVert_geom = [faceVert_geom[i] for i in random_indices]
+        faceEdge_geom = [faceEdge_geom[i] for i in random_indices]
 
-        random_indices = np.random.permutation(edge_ncs.shape[0])
-        edgeFace_ncs = edgeFace_ncs[random_indices]
-        edgeFace_bbox = edgeFace_bbox[random_indices]
-        edge_ncs = edge_ncs[random_indices]              # ne*32*3
-        edgeVert_geom = edgeVert_geom[random_indices]    # ne*2*3
-
-        edgeFace_ncs, mask = pad_zero(edgeFace_ncs, max_len=self.max_num_edge+1, dim=0)
-        edgeFace_bbox, _ = pad_zero(edgeFace_bbox, max_len=self.max_num_edge+1, dim=0)
-        edge_ncs, _ = pad_zero(edge_ncs, max_len=self.max_num_edge+1, dim=0)
-        edgeVert_geom, _ = pad_zero(edgeVert_geom, max_len=self.max_num_edge+1, dim=0)
-
+        face_bbox, mask = pad_zero(face_bbox, max_len=self.max_face, dim=0)                     # max_faces*6, max_faces
+        mask = mask.sum(keepdims=True)                                                          # 1
+        faceVert_geom, faceVert_mask = pad_and_stack(faceVert_geom, max_n=self.max_edge)        # nf*fv*3, nf*fv
+        faceVert_mask = faceVert_mask.sum(-1, keepdims=True)                                    # nf*1
+        faceEdge_geom, faceEdge_mask = pad_and_stack(faceEdge_geom, max_n=self.max_edge)        # nf*fe*12, nf*fe
+        faceEdge_mask = faceEdge_mask.sum(-1, keepdims=True)                                    # nf*1
+        assert mask == data['face_ctrs'].shape[0]
+        face_geom, _ = pad_zero(face_geom, max_len=self.max_face, dim=0)                        # max_faces*48
+        faceVert_geom, _ = pad_zero(faceVert_geom, max_len=self.max_face, dim=0)                # max_faces*fv*3
+        faceVert_mask, _ = pad_zero(faceVert_mask, max_len=self.max_face, dim=0)                # max_faces*1
+        faceEdge_geom, _ = pad_zero(faceEdge_geom, max_len=self.max_face, dim=0)                # max_faces*fe*12
+        faceEdge_mask, _ = pad_zero(faceEdge_mask, max_len=self.max_face, dim=0)                # max_faces*1
         if data_class is not None:
             return (
-                torch.FloatTensor(edge_ncs),              # ne*32*3
-                torch.FloatTensor(edgeFace_ncs),          # ne*2*32*32*3
-                torch.FloatTensor(edgeFace_bbox),         # ne*2*6
-                torch.FloatTensor(edgeVert_geom),         # ne*2*3
-                torch.from_numpy(mask),                   # max_num_edge
-                torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
+                torch.FloatTensor(face_geom),          # max_faces*48
+                torch.FloatTensor(face_bbox),          # max_faces*6
+                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
+                torch.FloatTensor(faceEdge_geom),      # max_faces*fe*12
+                torch.from_numpy(mask),                # 1
+                torch.from_numpy(faceVert_mask),       # max_faces*1
+                torch.from_numpy(faceEdge_mask),       # max_faces*1
+                torch.LongTensor([data_class + 1])     # add 1, class 0 = un-cond (furniture)
             )
         else:
             return (
-                torch.FloatTensor(edge_ncs),              # ne*32*3
-                torch.FloatTensor(edgeFace_ncs),         # ne*2*32*32*3
-                torch.FloatTensor(edgeFace_bbox),        # ne*2*6
-                torch.FloatTensor(edgeVert_geom),           # ne*2*3
-                torch.from_numpy(mask),                   # max_num_edge
+                torch.FloatTensor(face_geom),          # max_faces*48
+                torch.FloatTensor(face_bbox),          # max_faces*6
+                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
+                torch.FloatTensor(faceEdge_geom),      # max_faces*fe*12
+                torch.from_numpy(mask),                # 1
+                torch.from_numpy(faceVert_mask),       # max_faces*1
+                torch.from_numpy(faceEdge_mask),       # max_faces*1 un-cond deepcad/abc
             )
 
+
+class EdgeGeomData(torch.utils.data.Dataset):
+    """ Edge Feature Dataloader """
+
+    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+        self.max_face = args.max_face
+        self.max_edge = args.max_edge
+        self.max_num_edge = args.max_num_edge
+        self.bbox_scaled = args.bbox_scaled
+        self.aug = aug
+        self.data = []
+        # Load data
+        self.data = load_data(input_data, input_list, validate, args)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        # Load data
+        data_class = None
+        if isinstance(self.data[index], tuple):
+            data_path, data_class = self.data[index]
+        else:
+            data_path = self.data[index]
+
+        with open(data_path, "rb") as tf:
+            data = pickle.load(tf)
+
+        face_ctrs, edge_ctrs, edgeFace_adj, face_bbox, vert_geom, edgeVert_adj = (
+            data['face_ctrs'].reshape(-1, 48),         # nf*(16*3)
+            data['edge_ctrs'].reshape(-1, 12),         # ne*(4*3)
+            data['edgeFace_adj'],                      # ne*2
+            data['face_bbox_wcs'],                     # nf*6
+            data['vert_wcs'],                          # nv*3
+            data['edgeVert_adj']                       # ne*2
+        )
+
+        # Increase value range
+        face_bbox = sort_bbox_multi(face_bbox)
+        face_bbox = face_bbox * self.bbox_scaled      # nf*6
+        face_ctrs *= self.bbox_scaled                 # nf*48
+        edge_ctrs *= self.bbox_scaled                 # ne*12
+        vert_geom *= self.bbox_scaled                 # nv*3
+
+        edgeFace_geom = face_ctrs[edgeFace_adj]       # ne*2*48
+        edgeFace_bbox = face_bbox[edgeFace_adj]       # ne*2*6
+        edgeVert_geom = vert_geom[edgeVert_adj]       # ne*2*3
+
+        random_indices = np.random.permutation(edge_ctrs.shape[0])
+        edgeFace_geom = edgeFace_geom[random_indices]
+        edgeFace_bbox = edgeFace_bbox[random_indices]
+        edge_geom = edge_ctrs[random_indices]              # ne*12
+        edgeVert_geom = edgeVert_geom[random_indices]      # ne*2*3
+
+        edgeFace_geom, mask = pad_zero(edgeFace_geom, max_len=self.max_num_edge, dim=0)
+        edgeFace_bbox, _ = pad_zero(edgeFace_bbox, max_len=self.max_num_edge, dim=0)
+        edge_geom, _ = pad_zero(edge_geom, max_len=self.max_num_edge, dim=0)
+        edgeVert_geom, _ = pad_zero(edgeVert_geom, max_len=self.max_num_edge, dim=0)
+        mask = mask.sum(keepdims=True)
+
+        if data_class is not None:
+            return (
+                torch.FloatTensor(edge_geom),              # max_num_edge*12
+                torch.FloatTensor(edgeFace_geom),          # max_num_edge*2*48
+                torch.FloatTensor(edgeFace_bbox),          # max_num_edge*2*6
+                torch.FloatTensor(edgeVert_geom),          # max_num_edge*2*3
+                torch.from_numpy(mask),                    # 1
+                torch.LongTensor([data_class + 1])         # add 1, class 0 = uncond (furniture)
+            )
+        else:
+            return (
+                torch.FloatTensor(edge_geom),              # max_num_edge*32*3
+                torch.FloatTensor(edgeFace_geom),          # max_num_edge*2*32*32*3
+                torch.FloatTensor(edgeFace_bbox),          # max_num_edge*2*6
+                torch.FloatTensor(edgeVert_geom),          # max_num_edge*2*3
+                torch.from_numpy(mask),                    # 1
+            )

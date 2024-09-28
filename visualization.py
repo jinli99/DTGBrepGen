@@ -425,6 +425,77 @@ def draw_points(points):
     pyo.plot(fig)
 
 
+def draw_ctrs(ctrs):
+    """
+    Draw 16 control points, their grid lines, and display the ID for each point.
+
+    Args:
+    - ctrs (numpy.array): A 48-dimensional numpy array representing 16 control points,
+                          where each point has x, y, z coordinates. The points form a 4x4 grid.
+    """
+    # Check if the shape of ctrs is correct
+    assert ctrs.shape == (48,), "ctrs should be a 48-dimensional numpy array"
+
+    # Reshape the 48-dimensional array into 16 3D points
+    ctrs = ctrs.reshape(16, 3)
+
+    # Create an empty figure for scatter and line plots
+    fig = go.Figure()
+
+    # Extract the x, y, z coordinates of each control point
+    x_points = ctrs[:, 0]
+    y_points = ctrs[:, 1]
+    z_points = ctrs[:, 2]
+
+    # Add scatter plot for the control points with labels (IDs)
+    fig.add_trace(go.Scatter3d(
+        x=x_points,
+        y=y_points,
+        z=z_points,
+        mode='markers+text',
+        marker=dict(size=5, color='blue'),
+        text=[f'{i}' for i in range(16)],  # Add IDs as labels
+        textposition='top center',
+        name="Control Points"
+    ))
+
+    # Draw grid lines along rows
+    for i in range(4):  # Drawing row lines
+        fig.add_trace(go.Scatter3d(
+            x=x_points[i * 4:(i + 1) * 4],
+            y=y_points[i * 4:(i + 1) * 4],
+            z=z_points[i * 4:(i + 1) * 4],
+            mode='lines',
+            line=dict(color='red', width=2),
+            name=f'Row {i + 1}'
+        ))
+
+    # Draw grid lines along columns
+    for j in range(4):  # Drawing column lines
+        fig.add_trace(go.Scatter3d(
+            x=x_points[j::4],
+            y=y_points[j::4],
+            z=z_points[j::4],
+            mode='lines',
+            line=dict(color='red', width=2),
+            name=f'Column {j + 1}'
+        ))
+
+    # Set the layout for the 3D plot
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X Axis',
+            yaxis_title='Y Axis',
+            zaxis_title='Z Axis',
+        ),
+        title="Control Points, Grid Lines, and IDs",
+        showlegend=False
+    )
+
+    # Display the plot
+    pyo.plot(fig)
+
+
 """Visulize Step File"""
 # from OCC.Display.SimpleGui import init_display
 # from OCC.Core.STEPControl import STEPControl_Reader

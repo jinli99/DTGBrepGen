@@ -10,9 +10,9 @@ from geometry.trainers import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer,
 from geometry.dataFeature import GraphFeatures
 
 
-def get_args_gdm():
+def get_args_geom():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', type=str, default='data_process/furniture_parsed',
+    parser.add_argument('--data', type=str, default='data_process/GeomDatasets/furniture_parsed',
                         help='Path to data folder')
     parser.add_argument('--train_list', type=str, default='data_process/furniture_data_split_6bit.pkl',
                         help='Path to data list')
@@ -21,14 +21,14 @@ def get_args_gdm():
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='faceGeom',)
+        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='edgeGeom',)
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
     parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
-    parser.add_argument('--test_epochs', type=int, default=1, help='number of epochs to test model')
+    parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
     parser.add_argument('--timesteps', type=int, default=500, help='diffusion timesteps')
     parser.add_argument('--max_face', type=int, default=50, help='maximum number of faces')
@@ -44,7 +44,7 @@ def get_args_gdm():
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_gdm_faceGeom", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_geom_edgeGeom", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -67,8 +67,8 @@ def compute_dataset_info(args):
             data = pickle.load(file)
             fef_adj = data['fef_adj']
             max_num_edge = max(max_num_edge, len(data['edgeFace_adj']))
-            max_vertex = max(max_vertex, len(data['corner_unique']))
-            max_vertexFace = max(max_vertexFace, max([len(i) for i in data['vertexFace']]))
+            max_vertex = max(max_vertex, len(data['vert_wcs']))
+            max_vertexFace = max(max_vertexFace, max([len(i) for i in data['vertFace_adj']]))
             assert np.array_equal(fef_adj, fef_adj.T) and np.all(np.diag(fef_adj) == 0)
 
             unique, counts = np.unique(fef_adj, return_counts=True)
@@ -121,7 +121,7 @@ def compute_dataset_info(args):
 def main():
 
     # Parse input augments
-    args = get_args_gdm()
+    args = get_args_geom()
 
     # Make project directory if not exist
     if not os.path.exists(args.save_dir):
@@ -147,7 +147,7 @@ def main():
         val_dataset = VertGeomData(args.data, args.train_list, validate=True, aug=False, args=args)
         gdm = VertGeomTrainer(args, train_dataset, val_dataset, dataset_info)
     else:
-        assert args.option == 'edgeGeom', 'please choose between surface or edge'
+        assert args.option == 'edgeGeom'
         dataset_info = compute_dataset_info(args)
         train_dataset = EdgeGeomData(args.data, args.train_list, validate=False, aug=args.data_aug, args=args)
         val_dataset = EdgeGeomData(args.data, args.train_list, validate=True, aug=False, args=args)

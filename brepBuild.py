@@ -10,12 +10,11 @@ from tqdm import tqdm
 from chamferdist import ChamferDistance
 from contextlib import contextmanager
 from typing import Optional
-from OCC.Core.TColgp import TColgp_Array2OfPnt
 from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSpline
 from OCC.Core.GeomAbs import GeomAbs_C2
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeWire, BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakeEdge
 from OCC.Extend.TopologyUtils import TopologyExplorer, WireExplorer
-from OCC.Core.TColgp import TColgp_Array1OfPnt
+from OCC.Core.TColgp import TColgp_Array1OfPnt, TColgp_Array2OfPnt
 from OCC.Core.gp import gp_Pnt
 from OCC.Core.ShapeFix import ShapeFix_Face, ShapeFix_Wire, ShapeFix_Edge
 from OCC.Core.ShapeAnalysis import ShapeAnalysis_Wire
@@ -24,6 +23,8 @@ from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.StlAPI import StlAPI_Writer
 from OCC.Core.STEPControl import STEPControl_Reader
 from OCC.Core.IFSelect import IFSelect_RetDone
+from OCC.Core.TColStd import TColStd_Array1OfReal, TColStd_Array1OfInteger
+from OCC.Core.Geom import Geom_BSplineSurface, Geom_BSplineCurve
 from utils import load_data_with_prefix
 
 
@@ -143,54 +144,85 @@ class Brep2Mesh:
             raise ValueError(f"Unsupported method: {self.method}")
 
 
-def are_faces_connected(face1_edges, face2_edges, edgeVert):
-    # Find common edges between two faces
-    edges = list(set(face1_edges) & set(face2_edges))
+def create_bspline_surface(ctrs):
 
-    # Check if the common edges are connected
-    if len(edges) < 2:
-        return True
+    assert ctrs.shape[0] == 16
 
-    # Create a map of edge to its vertices
-    edge_vertices = {edge: set(edgeVert[edge]) for edge in edges}
+    poles = TColgp_Array2OfPnt(1, 4, 1, 4)
+    for i in range(4):
+        for j in range(4):
+            idx = i * 4 + j
+            poles.SetValue(i + 1, j + 1, gp_Pnt(*ctrs[idx]))
 
-    # Start from the first edge
-    current_edge = edges[0]
-    current_vertices = edge_vertices[current_edge]
-    connected_edges = set()
-    connected_edges.add(current_edge)
+    u_knots = TColStd_Array1OfReal(1, 2)
+    v_knots = TColStd_Array1OfReal(1, 2)
 
-    while len(connected_edges) < len(edges):
-        found_next_edge = False
+    u_knots.SetValue(1, 0.0)
+    u_knots.SetValue(2, 1.0)
+    v_knots.SetValue(1, 0.0)
+    v_knots.SetValue(2, 1.0)
 
-        for edge in edges:
-            if edge in connected_edges:
-                continue
-            if not current_vertices.isdisjoint(edge_vertices[edge]):
-                connected_edges.add(edge)
-                current_vertices = current_vertices.union(edge_vertices[edge])
-                found_next_edge = True
-                break
+    u_mults = TColStd_Array1OfInteger(1, 2)
+    v_mults = TColStd_Array1OfInteger(1, 2)
 
-        if not found_next_edge:
-            return False
+    u_mults.SetValue(1, 4)
+    u_mults.SetValue(2, 4)
+    v_mults.SetValue(1, 4)
+    v_mults.SetValue(2, 4)
 
-    return True
+    bspline_surface = Geom_BSplineSurface(poles, u_knots, v_knots, u_mults, v_mults, 3, 3)
+
+    return bspline_surface
 
 
-def scale_surf(bbox, surf, node_mask):   # b*n*6, b*n*p*3, b*n
+def create_bspline_curve(ctrs):
 
-    face_wcs = []
+    assert ctrs.shape[0] == 4
 
-    for box, face, mask in zip(bbox, surf, node_mask):  #
-        box = box[mask]       # n1*6
-        face = face[mask]     # n1*p*3
-        min_xyz, max_xyz = box.reshape(-1, 2, 3).min(1).values, box.reshape(-1, 2, 3).max(1).values   # n1*3, n1*3
-        center_point = (min_xyz + max_xyz) * 0.5  # n1*3
-        face = face * ((max_xyz - min_xyz) * 0.5).unsqueeze(1) + center_point.unsqueeze(1)  # n1*p*3
-        face_wcs.append(face)
+    poles = TColgp_Array1OfPnt(1, 4)
+    for i, ctr in enumerate(ctrs, 1):
+        poles.SetValue(i, gp_Pnt(*ctr))
 
-    return face_wcs
+    n_knots = 2
+    knots = TColStd_Array1OfReal(1, n_knots)
+    knots.SetValue(1, 0.0)
+    knots.SetValue(2, 1.0)
+
+    mults = TColStd_Array1OfInteger(1, n_knots)
+    mults.SetValue(1, 4)
+    mults.SetValue(2, 4)
+
+    bspline_curve = Geom_BSplineCurve(poles, knots, mults, 3)
+
+    return bspline_curve
+
+
+def sample_bspline_surface(bspline_surface, num_u=32, num_v=32):
+    u_start, u_end, v_start, v_end = bspline_surface.Bounds()
+    u_range = np.linspace(u_start, u_end, num_u)
+    v_range = np.linspace(v_start, v_end, num_v)
+
+    points = np.zeros((num_u, num_v, 3))
+
+    for i, u in enumerate(u_range):
+        for j, v in enumerate(v_range):
+            pnt = bspline_surface.Value(u, v)
+            points[i, j] = [pnt.X(), pnt.Y(), pnt.Z()]
+
+    return points      # 32*32*3
+
+
+def sample_bspline_curve(bspline_curve, num_points=32):
+    u_start, u_end = bspline_curve.FirstParameter(), bspline_curve.LastParameter()
+    u_range = np.linspace(u_start, u_end, num_points)
+
+    points = np.zeros((num_points, 3))
+
+    for i, u in enumerate(u_range):
+        pnt = bspline_curve.Value(u)
+        points[i] = [pnt.X(), pnt.Y(), pnt.Z()]
+
+    return points    # 32*3
 
 
 def compute_bbox_center_and_size(min_corner, max_corner):

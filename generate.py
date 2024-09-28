@@ -6,7 +6,7 @@ from model import (AutoencoderKLFastDecode, FaceBboxTransformer, FaceGeomTransfo
 from geometry.diffusion import DDPM
 from utils import (pad_and_stack, pad_zero, xe_mask, make_edge_symmetric, assert_weak_one_hot, generate_random_string,
                    remove_box_edge, construct_feTopo, reconstruct_vv_adj,
-                   construct_vertFace, construct_faceEdge, construct_faceVert, check_step_ok, sort_bbox_multi, construct_fvf_geom)
+                   construct_vertFace, construct_faceVert, check_step_ok, sort_bbox_multi, construct_fvf_geom)
 from geometry.dataFeature import GraphFeatures
 from OCC.Extend.DataExchange import write_stl_file, write_step_file
 from brepBuild import (
@@ -36,14 +36,19 @@ def get_args_gdm():
 
 def get_ok_step(batch_size, mode='train'):
     with open("data_process/furniture_data_split_6bit.pkl", 'rb') as f:
-        train_data = pickle.load(f)[mode]
+        if mode == 'train':
+            datas = pickle.load(f)[mode]
+        else:
+            assert mode == 'test'
+            datas = pickle.load(f)
+            datas = datas['test'] + datas['val']
+    datas = random.sample(datas, len(datas))
     batch_file = []
-    for i in range(batch_size):
-        while True:
-            path = random.choice(train_data)
-            if check_step_ok(path):
-                batch_file.append(path)
-                break
+    while len(batch_file) < batch_size and datas:
+        file = datas.pop(0)
+        with open(os.path.join('data_process/GeomDatasets/furniture_parsed', file), 'rb') as tf:
+            if check_step_ok(pickle.load(tf)):
+                batch_file.append(file)
 
     return batch_file
 
@@ -258,6 +263,12 @@ def get_edgeGeom(ddpm, face_bbox_geom, edgeFace_adj, vert_geom, edgeVert_adj, de
 
 
 def main():
+
+    batch_file = get_ok_step(150, mode='test')
+    with open('batch_file_test.pkl', 'wb') as f:
+        pickle.dump(batch_file, f)
+    return
+
     args = get_args_gdm()
 
     # Make project directory if not exist
@@ -332,10 +343,6 @@ def main():
     # Initial feature extractor
     extract_feat = GraphFeatures(hyper_params['extract_type'], hyper_params['node_distribution'].shape[0])
 
-    # batch_file = get_ok_step(50, mode='test')
-    # with open('batch_file_test.pkl', 'wb') as f:
-    #     pickle.dump(batch_file, f)
-    # return
     with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 

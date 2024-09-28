@@ -3,15 +3,17 @@ import random
 import string
 import numpy as np
 import os
-import pickle
 from collections import defaultdict
 
 
-def check_step_ok(file):
-    with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
-        data = pickle.load(tf)
+def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
+
     faceEdge_adj, face_bbox, edge_bbox, fef_adj = (data['faceEdge_adj'], data['face_bbox_wcs'],
                                                    data['edge_bbox_wcs'], data['fef_adj'])
+
+    # Skip complex faces and complex edges
+    if data['face_ctrs'] is None or data['edge_ctrs'] is None:
+        return False
 
     # Check Topology
     edgeVert_adj = data['edgeVert_adj']
@@ -25,15 +27,15 @@ def check_step_ok(file):
             return False
 
     # Skip over max edge-classes
-    if fef_adj.max() >= 5:
+    if fef_adj.max() >= edge_classes:
         return False
 
     # Skip over max size data
-    if len(face_bbox) > 50:
+    if len(face_bbox) > max_face:
         return False
 
     for face_edges in faceEdge_adj:
-        if len(face_edges) > 30:
+        if len(face_edges) > max_edge:
             return False
 
     # Skip faces too close to each other
@@ -177,20 +179,6 @@ def construct_edgeFace_adj(edge_face_topo, node_mask=None):   # b*n*n, b*n
     return edgeFace_adj
 
 
-def construct_faceEdge(edgeFace):
-
-    max_face_id = torch.max(edgeFace).item()
-    faceEdge_dict = defaultdict(list)
-
-    for edge_id, (face1, face2) in enumerate(edgeFace):
-        faceEdge_dict[face1.item()].append(edge_id)
-        faceEdge_dict[face2.item()].append(edge_id)
-
-    faceEdge = [faceEdge_dict[i] for i in range(max_face_id + 1)]
-
-    return faceEdge
-
-
 def construct_vv_list(edgeVert_adj):
 
     vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj)]
@@ -306,7 +294,7 @@ def sort_bbox_multi(bbox):
         return np.concatenate((bbox_min, bbox_max), axis=-1)  # n*6
     elif isinstance(bbox, torch.Tensor):
         bbox = bbox.view(-1, 2, 3)  # n*2*3
-        bbox_min, bbox_max = bbox.min(1)[0], bbox.max(1)[0]  # n*3, n*3
+        bbox_min, bbox_max = bbox.min(1)[0], bbox.max(1)[0]    # n*3, n*3
         return torch.cat((bbox_min, bbox_max), dim=-1)  # n*6
     else:
         raise TypeError('Input must be either a NumPy array or a PyTorch tensor.')
