@@ -1606,192 +1606,6 @@ class VertGeomTransformer(nn.Module):
         return x
 
 
-class FaceGeomTransformer(nn.Module):
-    """
-    Transformer-based latent diffusion model for face feature
-    """
-
-    def __init__(self, n_layers: int, face_geom_dim: int):
-        super().__init__()
-        self.embed_dim = 768
-
-        layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=12, norm_first=True,
-                                           dim_feedforward=1024, dropout=0.1)
-        self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
-
-        self.face_geom_embed = nn.Sequential(
-            nn.Linear(face_geom_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
-
-        self.face_bbox_embed = nn.Sequential(
-            nn.Linear(6, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
-
-        self.faceVert_embed = nn.Sequential(
-            nn.Linear(3, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
-
-        self.time_embed = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
-
-        self.fc_out = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, face_geom_dim),
-        )
-
-    def forward(self, x_t, face_bbox, faceVert_geom, face_mask, faceVert_mask, t):
-        """
-            Args:
-                x_t: [batch_size, nf, 48]
-                face_bbox: [batch_size, nf, 6]
-                faceVert_geom: [batch_size, nf, fv, 3]
-                face_mask: [batch_size, nf]
-                faceVert_mask: [batch_size, nf, fv]
-                t: [batch_size, 1]
-            Returns:
-                Noise prediction with shape [batch_size, nf, 48]
-        """
-
-        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
-        face_bbox_embeds = self.face_bbox_embed(face_bbox)                    # b*nf*embed_dim
-        face_geom_embeds = self.face_geom_embed(x_t)                          # b*nf*embed_dim
-
-        faceVert_embeds = self.faceVert_embed(faceVert_geom)                  # b*nf*fv*embed_dim
-        faceVert_embeds = faceVert_embeds.sum(-2) / (faceVert_mask.sum(-1, keepdim=True)+1e-8)     # b*nf*embed_dim
-
-        tokens = face_geom_embeds + face_bbox_embeds + faceVert_embeds + time_embeds              # b*nf*embed_dim
-
-        output = self.net(
-            src=tokens.permute(1, 0, 2),
-            src_key_padding_mask=~face_mask,
-        ).transpose(0, 1)
-
-        pred = self.fc_out(output)     # b*nf*48
-        return pred
-
-
-# class FaceGeomTransformer(nn.Module):
-#     """
-#     Transformer-based latent diffusion model for face feature
-#     """
-#
-#     def __init__(self, n_layers: int, face_geom_dim: int):
-#         super().__init__()
-#         self.embed_dim = 512
-#
-#         layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=8, norm_first=True,
-#                                            dim_feedforward=1024, dropout=0.1)
-#         self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
-#
-#         # self.u_embed = nn.Embedding(4, 32)
-#         # self.v_embed = nn.Embedding(4, 32)
-#         # self.coord_embed = nn.Linear(3, 32)
-#         # self.ctrs_embed = nn.TransformerEncoder(
-#         #     nn.TransformerEncoderLayer(d_model=32,
-#         #                                nhead=1, norm_first=True, dim_feedforward=64, dropout=0.1),
-#         #     1, nn.LayerNorm(32))
-#         # self.ctrs_out = nn.Linear(self.embed_dim, self.embed_dim)
-#
-#         self.face_geom_embed = nn.Sequential(
-#             nn.Linear(face_geom_dim, self.embed_dim),
-#             nn.LayerNorm(self.embed_dim),
-#             nn.SiLU(),
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#         )
-#
-#         self.face_bbox_embed = nn.Sequential(
-#             nn.Linear(6, self.embed_dim),
-#             nn.LayerNorm(self.embed_dim),
-#             nn.SiLU(),
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#         )
-#
-#         self.faceVert_embed = nn.Sequential(
-#             nn.Linear(3, self.embed_dim),
-#             nn.LayerNorm(self.embed_dim),
-#             nn.SiLU(),
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#         )
-#
-#         self.time_embed = nn.Sequential(
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#             nn.LayerNorm(self.embed_dim),
-#             nn.SiLU(),
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#         )
-#
-#         self.fc_out = nn.Sequential(
-#             nn.Linear(self.embed_dim, self.embed_dim),
-#             nn.LayerNorm(self.embed_dim),
-#             nn.SiLU(),
-#             nn.Linear(self.embed_dim, face_geom_dim),
-#         )
-#
-#     # def face_geom_embed(self, x, mask):
-#     #     """
-#     #         Args:
-#     #             x: [batch_size, nf, 48]
-#     #             mask: [batch_size, nf]
-#     #         Returns:
-#     #               [batch_size, nf, self.embed_dim]
-#     #     """
-#     #
-#     #     coord_embed = self.coord_embed(x.reshape(x.shape[0], -1, 16, 3))       # b*nf*16*32
-#     #     u_pos = torch.tensor([0]*4+[1]*4+[2]*4+[3]*4, device=x.device).long()
-#     #     v_pos = torch.tensor([0, 1, 2, 3]*4, device=x.device).long()
-#     #     x_embed = coord_embed + (self.u_embed(u_pos) + self.v_embed(v_pos)).unsqueeze(0).unsqueeze(0) * 0.5
-#     #     x_embed = self.ctrs_embed(x_embed.flatten(0, 1).permute(1, 0, 2)).transpose(0, 1)                # (b*nf)*16*32
-#     #     x_embed = x_embed.unflatten(0, (x.shape[0], x.shape[1])).flatten(2, 3)                           # b*nf*512
-#     #     x_embed = self.ctrs_out(x_embed)                                                                 # b*nf*512
-#     #     x_embed, _ = xe_mask(x=x_embed, node_mask=mask)                                                  # b*nf*512
-#     #     return x_embed
-#
-#     def forward(self, x_t, face_bbox, faceVert_geom, face_mask, faceVert_mask, t):
-#         """
-#             Args:
-#                 x_t: [batch_size, nf, 48]
-#                 face_bbox: [batch_size, nf, 6]
-#                 faceVert_geom: [batch_size, nf, fv, 3]
-#                 face_mask: [batch_size, nf]
-#                 faceVert_mask: [batch_size, nf, fv]
-#                 t: [batch_size, 1]
-#             Returns:
-#                 Noise prediction with shape [batch_size, nf, 48]
-#         """
-#
-#         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
-#         face_bbox_embeds = self.face_bbox_embed(face_bbox)                    # b*nf*embed_dim
-#         face_geom_embeds = self.face_geom_embed(x_t, face_mask)               # b*nf*embed_dim
-#
-#         faceVert_embeds = self.faceVert_embed(faceVert_geom)                  # b*nf*fv*embed_dim
-#         faceVert_embeds = faceVert_embeds.sum(-2) / (faceVert_mask.sum(-1, keepdim=True)+1e-8)     # b*nf*embed_dim
-#
-#         tokens = face_geom_embeds + face_bbox_embeds + faceVert_embeds + time_embeds               # b*nf*embed_dim
-#
-#         output = self.net(
-#             src=tokens.permute(1, 0, 2),
-#             src_key_padding_mask=~face_mask,
-#         ).transpose(0, 1)
-#
-#         pred = self.fc_out(output)     # b*nf*48
-#         return pred
-
-
 def sincos_embedding(inputs, dim, max_period=10000):
     """
     Create sinusoidal timestep embeddings.
@@ -1820,20 +1634,13 @@ class EdgeGeomTransformer(nn.Module):
     Transformer-based latent diffusion model for edge feature
     """
 
-    def __init__(self, n_layers: int, face_geom_dim: int, edge_geom_dim: int,):
+    def __init__(self, n_layers: int, edge_geom_dim: int,):
         super(EdgeGeomTransformer, self).__init__()
         self.embed_dim = 768
 
         layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=12, norm_first=True,
                                            dim_feedforward=1024, dropout=0.1)
         self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
-
-        self.face_geom_embed = nn.Sequential(
-            nn.Linear(face_geom_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
 
         self.edge_geom_embed = nn.Sequential(
             nn.Linear(edge_geom_dim, self.embed_dim),
@@ -1849,7 +1656,7 @@ class EdgeGeomTransformer(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim),
         )
 
-        self.edge_vertex_embed = nn.Sequential(
+        self.edge_vert_embed = nn.Sequential(
             nn.Linear(3, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
             nn.SiLU(),
@@ -1872,18 +1679,16 @@ class EdgeGeomTransformer(nn.Module):
 
         return
 
-    def forward(self, e_t, edge_faceInfo, edge_vertex, edge_mask, t):   # b*ne*12, b*ne*2*54, b*ne*2*3, b*ne, b*1
+    def forward(self, e_t, edgeFace_bbox, edgeVert_geom, edge_mask, t):   # b*ne*12, b*ne*2*6, b*ne*2*3, b*ne, b*1
         """ forward pass """
 
         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
-        face_bbox_embeds = self.face_bbox_embed(edge_faceInfo[..., -6:])      # b*ne*2*embed_dim
-        face_geom_embeds = self.face_geom_embed(edge_faceInfo[..., :-6])      # b*ne*2*embed_dim
-        # face_geom_embeds = 0
+        face_bbox_embeds = self.face_bbox_embed(edgeFace_bbox)                # b*ne*2*embed_dim
 
-        edge_vertex_embeds = self.edge_vertex_embed(edge_vertex).mean(-2)    # b*ne*embed_dim
+        edge_vert_embeds = self.edge_vert_embed(edgeVert_geom).mean(-2)    # b*ne*embed_dim
         edge_geom_embeds = self.edge_geom_embed(e_t)                         # b*ne*embed_dim
 
-        tokens = edge_geom_embeds + edge_vertex_embeds + time_embeds + (face_bbox_embeds + face_geom_embeds).mean(-2)  # b*ne*embed_dim
+        tokens = edge_geom_embeds + edge_vert_embeds + time_embeds + face_bbox_embeds.mean(-2)  # b*ne*embed_dim
 
         output = self.net(
             src=tokens.permute(1, 0, 2),
@@ -1891,6 +1696,122 @@ class EdgeGeomTransformer(nn.Module):
         ).transpose(0, 1)
 
         pred = self.fc_out(output)     # b*ne*12
+        return pred
+
+
+class FaceGeomTransformer(nn.Module):
+    """
+    Transformer-based latent diffusion model for face feature
+    """
+
+    def __init__(self, n_layers: int, face_geom_dim: int):
+        super().__init__()
+        self.embed_dim = 768
+        assert not self.embed_dim % 16
+
+        layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=12, norm_first=True,
+                                           dim_feedforward=1024, dropout=0.1)
+        self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
+
+        self.face_geom_embed = nn.Sequential(
+            nn.Linear(face_geom_dim, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        # self.coord_embed = nn.Sequential(nn.Linear(3, self.embed_dim // 16),
+        #                                  nn.LayerNorm(self.embed_dim // 16),
+        #                                  nn.SiLU(),
+        #                                  )
+        # self.u_embed = nn.Embedding(4, self.embed_dim // 16)
+        # self.v_embed = nn.Embedding(4, self.embed_dim // 16)
+        # self.geom_out = nn.Linear(self.embed_dim, self.embed_dim)
+
+        self.face_bbox_embed = nn.Sequential(
+            nn.Linear(6, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.faceVert_embed = nn.Sequential(
+            nn.Linear(3, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.faceEdge_embed = nn.Sequential(
+            nn.Linear(12, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.time_embed = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.fc_out = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, face_geom_dim),
+        )
+
+    # def face_geom_embed(self, x_t):
+    #     """
+    #         Args:
+    #             x_t: [batch_size, nf, 48]
+    #         Returns:
+    #             Noise prediction with shape [batch_size, nf, embed_dim]
+    #     """
+    #     face_geom_embeds = x_t.reshape([x_t.shape[0], x_t.shape[1], 16, 3])     # b*nf*16*3
+    #     face_geom_embeds = self.coord_embed(face_geom_embeds)                   # b*nf*16*48
+    #     u_embeds = self.u_embed(torch.tensor([0]*4+[1]*4+[2]*4+[3]*4, device=x_t.device).long())     # 16*48
+    #     v_embeds = self.v_embed(torch.tensor([0, 1, 2, 3]*4, device=x_t.device).long())              # 16*48
+    #     face_geom_embeds += (u_embeds + v_embeds).unsqueeze(0).unsqueeze(0) * 0.5                    # b*nf*16*48
+    #     face_geom_embeds = self.geom_out(face_geom_embeds.flatten(2, 3))                             # b*nf*768
+    #
+    #     return face_geom_embeds
+
+    def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, t):
+        """
+            Args:
+                x_t: [batch_size, nf, 48]
+                face_bbox: [batch_size, nf, 6]
+                faceVert_geom: [batch_size, nf, fv, 3]
+                faceEdge_geom: [batch_size, nf, fe, 12]
+                face_mask: [batch_size, nf]
+                faceVert_mask: [batch_size, nf, fv]
+                faceEdge_mask: [batch_size, nf, fe]
+                t: [batch_size, 1]
+            Returns:
+                Noise prediction with shape [batch_size, nf, 48]
+        """
+
+        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
+        face_bbox_embeds = self.face_bbox_embed(face_bbox)                    # b*nf*embed_dim
+        face_geom_embeds = self.face_geom_embed(x_t)                          # b*nf*embed_dim
+
+        faceVert_embeds = self.faceVert_embed(faceVert_geom)                  # b*nf*fv*embed_dim
+        faceVert_embeds = faceVert_embeds.sum(-2) / (faceVert_mask.sum(-1, keepdim=True)+1e-8)     # b*nf*embed_dim
+
+        faceEdge_embeds = self.faceEdge_embed(faceEdge_geom)                  # b*nf*fv*embed_dim
+        faceEdge_embeds = faceEdge_embeds.sum(-2) / (faceEdge_mask.sum(-1, keepdim=True)+1e-8)     # b*nf*embed_dim
+
+        tokens = face_geom_embeds + face_bbox_embeds + faceVert_embeds + faceEdge_embeds + time_embeds         # b*nf*embed_dim
+
+        output = self.net(
+            src=tokens.permute(1, 0, 2),
+            src_key_padding_mask=~face_mask,
+        ).transpose(0, 1)
+
+        pred = self.fc_out(output)     # b*nf*48
         return pred
 
 

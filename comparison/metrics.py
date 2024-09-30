@@ -171,7 +171,7 @@ class ValidMetric:
 
 def main():
 
-    xx = ValidMetric(input_path='/home/jing/PythonProjects/BrepGDM/samples/jing')
+    xx = ValidMetric(input_path='/home/jing/PythonProjects/BrepGDM/samples/furniture/')
     xx.compute_metric(parallel=True)
 
 

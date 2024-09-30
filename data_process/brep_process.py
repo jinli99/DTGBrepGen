@@ -623,21 +623,21 @@ if __name__ == '__main__':
         OUTPUT = 'abc_parsed'
     else:
         OUTPUT = 'furniture_parsed'
-    #
-    # # Load all STEP files
-    # if args.option == 'furniture':
-    #     step_dirs = load_furniture_step(args.input)
-    # else:
-    #     step_dirs = load_abc_step(args.input, args.option == 'deepcad')
-    #     step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
-    #
-    # # Process B-reps in parallel
-    # # for i in tqdm(step_dirs):
-    # #     process(i)
-    # valid = 0
-    # convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
-    # for status in tqdm(convert_iter, total=len(step_dirs)):
-    #     valid += status
-    # print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))
 
-    main()
+    # Load all STEP files
+    if args.option == 'furniture':
+        step_dirs = load_furniture_step(args.input)
+    else:
+        step_dirs = load_abc_step(args.input, args.option == 'deepcad')
+        step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
+
+    # Process B-reps in parallel
+    for i in tqdm(step_dirs):
+        process(i)
+    valid = 0
+    convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
+    for status in tqdm(convert_iter, total=len(step_dirs)):
+        valid += status
+    print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))
+
+    # main()

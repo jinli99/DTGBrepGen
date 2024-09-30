@@ -101,7 +101,7 @@ class SeqGenerator:
             topo_seq = torch.tensor(topo_seq, dtype=torch.long, device=device).unsqueeze(0)
             seq_mask = torch.ones((topo_seq.shape[0], topo_seq.shape[1]), device=device, dtype=torch.bool)    # b*ns
             logits = model.sample(topo_seq, seq_mask, mask)      # len(mask)
-            logits = torch.softmax(logits, dim=0)   # len(mask)
+            logits = torch.softmax(logits, dim=0)                # len(mask)
             return logits
 
     def check_topology_constraint(self, vert1, vert2):

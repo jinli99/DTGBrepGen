@@ -3,7 +3,7 @@ import os
 from tqdm import tqdm
 import pickle
 from model import FaceGeomTransformer, EdgeGeomTransformer
-from test_edge import get_edgeGeom
+from test_faceEdge import get_edgeGeom
 from geometry.diffusion import DDPM
 from utils import (generate_random_string, sort_bbox_multi, pad_and_stack, xe_mask)
 from OCC.Extend.DataExchange import write_step_file

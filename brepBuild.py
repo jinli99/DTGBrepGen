@@ -101,9 +101,10 @@ class Brep2Mesh:
             gmsh.finalize()
 
     def gMesh(self, file_path):
+        def target_func(q, path):
+            q.put(self.gMesh_single(path))
         result_queue = multiprocessing.Queue()
-        process = multiprocessing.Process(target=lambda q, path: q.put(self.gMesh_single(path)),
-                                          args=(result_queue, file_path))
+        process = multiprocessing.Process(target=target_func, args=(result_queue, file_path))
         process.start()
 
         start_time = time.time()
@@ -127,7 +128,7 @@ class Brep2Mesh:
             # print(f"Mesh generation for {file_path} failed with unknown error")
             return False
 
-    def generate(self, parallel=False):
+    def generate(self, parallel=True):
         if self.method == self.METHOD_GMSH:
             for file in tqdm(self.files):
                 if not self.gMesh(file):
@@ -427,6 +428,9 @@ def add_pcurves_to_edges(face):
             edge_fixer.FixAddPCurve(edge, face, False, 0.001)
 
 
+
+
+
 def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     """
     Fit parametric surfaces / curves and trim into B-rep
@@ -435,7 +439,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     # Fit surface bspline
     recon_faces = []
     for points in surf_wcs:
-        num_u_points, num_v_points = 32, 32
+        num_u_points, num_v_points = points.shape[0], points.shape[1]
         uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
         for u_index in range(1, num_u_points + 1):
             for v_index in range(1, num_v_points + 1):
@@ -447,7 +451,7 @@ def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 
     recon_edges = []
     for points in edge_wcs:
-        num_u_points = 32
+        num_u_points = points.shape[0]
         u_points_array = TColgp_Array1OfPnt(1, num_u_points)
         for u_index in range(1, num_u_points + 1):
             pt = points[u_index - 1]

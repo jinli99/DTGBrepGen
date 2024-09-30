@@ -143,6 +143,7 @@ def draw_bbox_feTopo(bbox, edgeFace_adj):
 
 
 def draw_bbox_face_edge(bbox=None, faces=None, edges=None):
+    # nf*6, nf*32*32*3, ne*32*3
     fig = go.Figure()
 
     # Helper function to draw boxes
@@ -388,6 +389,7 @@ def draw_edge(edge_wcs):
 
 
 def draw_points(points):
+    # nv*3
 
     colors = np.random.rand(points.shape[0], 3)
 

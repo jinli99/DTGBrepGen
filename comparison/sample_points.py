@@ -51,8 +51,8 @@ class SamplePoints:
         :return: parser
         """
         parser = argparse.ArgumentParser(description='Scale a set of meshes stored as OFF files.')
-        parser.add_argument('--in_dir', type=str, default='samples/test_eg_8layers', help='Path to input directory.')
-        parser.add_argument('--out_dir', type=str, default='point_cloud/furniture/test_eg_8layers', help='Path to output directory; files within are overwritten!')
+        parser.add_argument('--in_dir', type=str, default='samples/furniture', help='Path to input directory.')
+        parser.add_argument('--out_dir', type=str, default='comparison/point_cloud/furniture/test_faceEdge_02', help='Path to output directory; files within are overwritten!')
         return parser
 
     def run_parallel(self, path):
@@ -74,14 +74,14 @@ class SamplePoints:
 
         shape_paths = load_data_with_prefix(self.options.in_dir,
                                             '.stl')  # + load_data_with_prefix(self.options.in_dir, '.obj')
-        # random.shuffle(shape_paths)
-        # shape_paths = shape_paths[:400]
-        # for path in shape_paths:
-        #     self.run_parallel(path)
-        num_cpus = multiprocessing.cpu_count()
-        convert_iter = multiprocessing.Pool(num_cpus).imap(self.run_parallel, shape_paths)
-        for _ in tqdm(convert_iter, total=len(shape_paths)):
-            pass
+        random.shuffle(shape_paths)
+        shape_paths = shape_paths
+        for path in shape_paths:
+            self.run_parallel(path)
+        # num_cpus = multiprocessing.cpu_count()
+        # convert_iter = multiprocessing.Pool(num_cpus).imap(self.run_parallel, shape_paths)
+        # for _ in tqdm(convert_iter, total=len(shape_paths)):
+        #     pass
 
 
 def get_reference_stl():
