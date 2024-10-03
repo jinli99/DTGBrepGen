@@ -470,14 +470,16 @@ def process(step_folder, print_error=False):
         return 0
 
 
-def bspline_fitting(path):
+def bspline_fitting_local(path):
 
     with open(path, 'rb') as f:
         data = pickle.load(f)
 
     valid = 1
 
-    # # Fitting surface
+    # data['edge_ctrs'] = None
+
+    # Fitting surface
     # try:
     #     face_ncs = data['face_ncs']    # nf*32*32*3
     #     face_ctrs = []
@@ -513,6 +515,85 @@ def bspline_fitting(path):
 
     try:
         edge_ncs = data['edge_ncs']        # ne*32*3
+        edge_ctrs = []
+        for points in edge_ncs:
+            num_u_points = 32
+            u_points_array = TColgp_Array1OfPnt(1, num_u_points)
+            for u_index in range(1, num_u_points + 1):
+                pt = points[u_index - 1]
+                point_2d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
+                u_points_array.SetValue(u_index, point_2d)
+            try:
+                approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 5e-3).Curve()
+            except Exception as e:
+                print('high precision failed, trying mid precision...')
+                try:
+                    approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 8e-3).Curve()
+                except Exception as e:
+                    print('mid precision failed, trying low precision...')
+                    approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 5e-2).Curve()
+            num_poles = approx_edge.NbPoles()
+            assert approx_edge.Degree() == 3
+            assert num_poles == 4
+            assert not approx_edge.IsPeriodic() and not approx_edge.IsRational()
+            control_points = np.zeros((num_poles, 3))
+            poles = approx_edge.Poles()
+            for i in range(1, num_poles + 1):
+                point = poles.Value(i)
+                control_points[i - 1, :] = [point.X(), point.Y(), point.Z()]
+            edge_ctrs.append(control_points)
+        edge_ctrs = np.stack(edge_ctrs)  # nf*16*3
+        data['edge_ctrs'] = edge_ctrs
+    except Exception as e:
+        data['edge_ctrs'] = None
+        valid = 0
+
+    return data, valid
+
+
+def bspline_fitting_global(path):
+
+    with open(path, 'rb') as f:
+        data = pickle.load(f)
+
+    valid = 1
+
+    # Fitting surface
+    # try:
+    #     face_ncs = data['face_wcs']    # nf*32*32*3
+    #     face_ctrs = []
+    #     for points in face_ncs:
+    #         num_u_points, num_v_points = 32, 32
+    #         uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
+    #         for u_index in range(1, num_u_points + 1):
+    #             for v_index in range(1, num_v_points + 1):
+    #                 pt = points[u_index - 1, v_index - 1]
+    #                 point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
+    #                 uv_points_array.SetValue(u_index, v_index, point_3d)
+    #         approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 3, GeomAbs_C2, 5e-2).Surface()
+    #         num_u_poles = approx_face.NbUPoles()
+    #         num_v_poles = approx_face.NbVPoles()
+    #         control_points = np.zeros((num_u_poles * num_v_poles, 3))
+    #         assert approx_face.UDegree() == approx_face.VDegree() == 3
+    #         assert num_u_poles == num_v_poles == 4
+    #         assert (not approx_face.IsUPeriodic() and not approx_face.IsVPeriodic() and not approx_face.IsVRational()
+    #                 and not approx_face.IsVPeriodic())
+    #         poles = approx_face.Poles()
+    #         idx = 0
+    #         for u in range(1, num_u_poles + 1):
+    #             for v in range(1, num_v_poles + 1):
+    #                 point = poles.Value(u, v)
+    #                 control_points[idx, :] = [point.X(), point.Y(), point.Z()]
+    #                 idx += 1
+    #         face_ctrs.append(control_points)
+    #     face_ctrs = np.stack(face_ctrs)    # nf*16*3
+    #     data['face_ctrs'] = face_ctrs
+    # except Exception as e:
+    #     data['face_ctrs'] = None
+    #     valid = 0
+
+    try:
+        edge_ncs = data['edge_wcs']        # ne*32*3
         edge_ctrs = []
         for points in edge_ncs:
             num_u_points = 32
@@ -601,8 +682,8 @@ def main():
     print(len(files))
 
     total_valid = 0
-    for file in tqdm(files[7:]):
-        data, valid = bspline_fitting(file)
+    for file in tqdm(files):
+        data, valid = bspline_fitting_local(file)
         total_valid += valid
         with open(file, "wb") as tf:
             pickle.dump(data, tf)
@@ -624,20 +705,20 @@ if __name__ == '__main__':
     else:
         OUTPUT = 'furniture_parsed'
 
-    # Load all STEP files
-    if args.option == 'furniture':
-        step_dirs = load_furniture_step(args.input)
-    else:
-        step_dirs = load_abc_step(args.input, args.option == 'deepcad')
-        step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
+    # # Load all STEP files
+    # if args.option == 'furniture':
+    #     step_dirs = load_furniture_step(args.input)
+    # else:
+    #     step_dirs = load_abc_step(args.input, args.option == 'deepcad')
+    #     step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
+    #
+    # # Process B-reps in parallel
+    # for i in tqdm(step_dirs):
+    #     process(i)
+    # valid = 0
+    # convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
+    # for status in tqdm(convert_iter, total=len(step_dirs)):
+    #     valid += status
+    # print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))
 
-    # Process B-reps in parallel
-    for i in tqdm(step_dirs):
-        process(i)
-    valid = 0
-    convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
-    for status in tqdm(convert_iter, total=len(step_dirs)):
-        valid += status
-    print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))
-
-    # main()
+    main()

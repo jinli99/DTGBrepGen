@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 from tqdm import tqdm
 import pickle
 import multiprocessing
@@ -8,7 +9,7 @@ from model import FaceGeomTransformer
 from diffusers import DDPMScheduler, PNDMScheduler
 from utils import (sort_bbox_multi, pad_and_stack, xe_mask)
 from OCC.Extend.DataExchange import write_step_file
-from brepBuild import (joint_optimize, construct_brep, Brep2Mesh,
+from brepBuild import (joint_optimize, joint_optimize_global, construct_brep, construct_brep_fit, Brep2Mesh,
                        create_bspline_surface, create_bspline_curve,
                        sample_bspline_surface, sample_bspline_curve)
 from visualization import *
@@ -20,7 +21,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 def get_args_generate():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom_02/epoch_3000.pt')
+    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom_01/epoch_3000.pt')
     parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
     parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
     args = parser.parse_args()
@@ -154,8 +155,13 @@ def get_brep(args):
                                         face_bbox, vert_geom,
                                         edgeVert_adj, faceEdge_adj, len(edge_ncs), len(face_ncs))
 
+    # face_wcs = face_ncs
+    # edge_wcs = edge_ncs
+
+    # solid = construct_brep_fit(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
+
     try:
-        solid = construct_brep(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
+        solid = construct_brep_fit(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
     except Exception as e:
         print('B-rep rebuild failed...')
         return False
@@ -198,6 +204,12 @@ def main():
     with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 
+    # batch_file = random.sample(batch_file, 8)
+    batch_file = ['table/partstudio_7568.pkl',
+                  'chair/assembly_0039_fix.pkl',
+                  'cabinet/partstudio_partstudio_3851.pkl',
+                  'lamp/partstudio_0394.pkl']
+
     b_each = 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
@@ -220,20 +232,15 @@ def main():
         face_geom = [i[j] for i, j in zip(face_geom, face_mask)]
 
         """****************Construct Brep****************"""
-        multiprocessing.set_start_method('spawn', force=True)
-        with Pool(processes=4) as pool:
-            args_list = [(face_geom[j].cpu().numpy() / args.bbox_scaled,
-                          face_bbox[j].cpu().numpy() / args.bbox_scaled,
-                          vert_geom[j].cpu().numpy() / args.bbox_scaled,
-                          edge_geom[j].cpu().numpy() / args.bbox_scaled,
-                          edgeFace_adj[j].cpu().numpy(),
-                          edgeVert_adj[j].cpu().numpy(),
-                          faceEdge_adj[j]) for j in range(b)]
-            results = pool.map(get_brep, args_list)
-            pool.close()
-            pool.join()
+        for j in range(b):
+            solid = get_brep((face_geom[j].cpu().numpy() / args.bbox_scaled,
+                              face_bbox[j].cpu().numpy() / args.bbox_scaled,
+                              vert_geom[j].cpu().numpy() / args.bbox_scaled,
+                              edge_geom[j].cpu().numpy() / args.bbox_scaled,
+                              edgeFace_adj[j].cpu().numpy(),
+                              edgeVert_adj[j].cpu().numpy(),
+                              faceEdge_adj[j]))
 
-        for j, solid in enumerate(results):
             if solid is False:
                 continue
             save_name = datas['name'][j]
@@ -241,9 +248,10 @@ def main():
 
     torch.cuda.empty_cache()
     print('write stl...')
-    mesh_tool = Brep2Mesh(input_path=args.save_folder)
+    mesh_tool = Brep2Mesh(input_path=args.save_folder, method='occ')
     mesh_tool.generate()
 
 
 if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn', force=True)
     main()

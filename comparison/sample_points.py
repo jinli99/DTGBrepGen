@@ -52,7 +52,7 @@ class SamplePoints:
         """
         parser = argparse.ArgumentParser(description='Scale a set of meshes stored as OFF files.')
         parser.add_argument('--in_dir', type=str, default='samples/furniture', help='Path to input directory.')
-        parser.add_argument('--out_dir', type=str, default='comparison/point_cloud/furniture/test_faceEdge_02', help='Path to output directory; files within are overwritten!')
+        parser.add_argument('--out_dir', type=str, default='comparison/point_cloud/furniture/test_face_02', help='Path to output directory; files within are overwritten!')
         return parser
 
     def run_parallel(self, path):

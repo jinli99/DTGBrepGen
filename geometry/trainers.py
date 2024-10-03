@@ -947,14 +947,14 @@ class FaceGeomTrainer:
                 x_0 = face_geom * self.z_scaled                      # b*nf*48
                 x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
-                # Augment the surface position and latent (see https://arxiv.org/abs/2106.15282)
-                conditions = [face_bbox, faceVert_geom, faceEdge_geom]
-                aug_data = []
-                for cond in conditions:
-                    aug_timesteps = torch.randint(0, 15, (x_0.shape[0],), device=self.device).long()
-                    aug_noise = torch.randn(cond.shape).to(self.device)
-                    aug_data.append(self.noise_scheduler.add_noise(cond, aug_noise, aug_timesteps))
-                face_bbox, faceVert_geom, faceEdge_geom = aug_data[0], aug_data[1], aug_data[2]
+                # # Augment the surface position and latent (see https://arxiv.org/abs/2106.15282)
+                # conditions = [face_bbox, faceVert_geom, faceEdge_geom]
+                # aug_data = []
+                # for cond in conditions:
+                #     aug_timesteps = torch.randint(0, 15, (x_0.shape[0],), device=self.device).long()
+                #     aug_noise = torch.randn(cond.shape).to(self.device)
+                #     aug_data.append(self.noise_scheduler.add_noise(cond, aug_noise, aug_timesteps))
+                # face_bbox, faceVert_geom, faceEdge_geom = aug_data[0], aug_data[1], aug_data[2]
 
                 self.optimizer.zero_grad()  # zero gradient
 

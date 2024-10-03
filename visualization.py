@@ -188,9 +188,9 @@ def draw_bbox_face_edge(bbox=None, faces=None, edges=None):
 
     # Set the layout
     fig.update_layout(scene=dict(
-        xaxis=dict(nticks=10, range=[-1, 1]),
-        yaxis=dict(nticks=10, range=[-1, 1]),
-        zaxis=dict(nticks=10, range=[-1, 1]),
+        xaxis=dict(nticks=10, range=[-1.1, 1.1]),
+        yaxis=dict(nticks=10, range=[-1.1, 1.1]),
+        zaxis=dict(nticks=10, range=[-1.1, 1.1]),
         aspectratio=dict(x=1, y=1, z=1),
         aspectmode='cube'
     ))
@@ -388,38 +388,43 @@ def draw_edge(edge_wcs):
     pyo.plot(fig)
 
 
-def draw_points(points):
+def draw_points(points, random_color=False):
     # nv*3
 
-    colors = np.random.rand(points.shape[0], 3)
+    if random_color:
+        colors = np.random.rand(points.shape[0], 3)
 
-    scatter = go.Scatter3d(
-        x=points[:, 0],
-        y=points[:, 1],
-        z=points[:, 2],
-        mode='markers',
-        marker=dict(
-            size=5,
-            color=['rgb({},{},{})'.format(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)) for c in colors]
+        scatter = go.Scatter3d(
+            x=points[:, 0],
+            y=points[:, 1],
+            z=points[:, 2],
+            mode='markers',
+            marker=dict(
+                size=5,
+                color=['rgb({},{},{})'.format(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)) for c in colors]
+            )
         )
-    )
+    else:
+        scatter = go.Scatter3d(
+            x=points[:, 0],
+            y=points[:, 1],
+            z=points[:, 2],
+            mode='markers',
+            marker=dict(
+                size=5
+            )
+        )
 
     fig = go.Figure(data=[scatter])
 
-    # fig.update_layout(
-    #     scene=dict(
-    #         xaxis_title='X Axis',
-    #         yaxis_title='Y Axis',
-    #         zaxis_title='Z Axis'
-    #     ),
-    #     title="3D Scatter Plot"
-    # )
+    range_min = min(-1, points.min())
+    range_max = max(1, points.max())
 
     # Set the layout
     fig.update_layout(scene=dict(
-        xaxis=dict(nticks=10, range=[-1, 1]),
-        yaxis=dict(nticks=10, range=[-1, 1]),
-        zaxis=dict(nticks=10, range=[-1, 1]),
+        xaxis=dict(nticks=10, range=[range_min, range_max]),
+        yaxis=dict(nticks=10, range=[range_min, range_max]),
+        zaxis=dict(nticks=10, range=[range_min, range_max]),
         aspectratio=dict(x=1, y=1, z=1),
         aspectmode='cube'
     ))
@@ -429,59 +434,63 @@ def draw_points(points):
 
 def draw_ctrs(ctrs):
     """
-    Draw 16 control points, their grid lines, and display the ID for each point.
+    Draw multiple control grids with b batches of control points, their grid lines, and display IDs for each point.
 
     Args:
-    - ctrs (numpy.array): A 48-dimensional numpy array representing 16 control points,
-                          where each point has x, y, z coordinates. The points form a 4x4 grid.
+    - ctrs (numpy.array): A b * 48-dimensional numpy array representing b batches of 16 control points per grid,
+                          where each point has x, y, z coordinates. The points form 4x4 grids.
     """
-    # Check if the shape of ctrs is correct
-    assert ctrs.shape == (48,), "ctrs should be a 48-dimensional numpy array"
+    b = ctrs.shape[0]  # Number of control grids
+    assert ctrs.shape[1] == 48, "Each control grid should have 48 values (16 control points with x, y, z coordinates)"
 
-    # Reshape the 48-dimensional array into 16 3D points
-    ctrs = ctrs.reshape(16, 3)
+    # Reshape the array into (b, 16, 3) where each grid has 16 3D points
+    ctrs = ctrs.reshape(b, 16, 3)
 
-    # Create an empty figure for scatter and line plots
+    # Define a color palette for different grids
+    color_palette = ['blue', 'green', 'red', 'orange', 'purple', 'cyan', 'magenta', 'yellow']
     fig = go.Figure()
 
-    # Extract the x, y, z coordinates of each control point
-    x_points = ctrs[:, 0]
-    y_points = ctrs[:, 1]
-    z_points = ctrs[:, 2]
+    for batch_idx in range(b):
+        # Extract the x, y, z coordinates of each control point for the current batch
+        x_points = ctrs[batch_idx, :, 0]
+        y_points = ctrs[batch_idx, :, 1]
+        z_points = ctrs[batch_idx, :, 2]
 
-    # Add scatter plot for the control points with labels (IDs)
-    fig.add_trace(go.Scatter3d(
-        x=x_points,
-        y=y_points,
-        z=z_points,
-        mode='markers+text',
-        marker=dict(size=5, color='blue'),
-        text=[f'{i}' for i in range(16)],  # Add IDs as labels
-        textposition='top center',
-        name="Control Points"
-    ))
+        color = color_palette[batch_idx % len(color_palette)]  # Choose color based on the batch index
 
-    # Draw grid lines along rows
-    for i in range(4):  # Drawing row lines
+        # Add scatter plot for the control points with labels (IDs)
         fig.add_trace(go.Scatter3d(
-            x=x_points[i * 4:(i + 1) * 4],
-            y=y_points[i * 4:(i + 1) * 4],
-            z=z_points[i * 4:(i + 1) * 4],
-            mode='lines',
-            line=dict(color='red', width=2),
-            name=f'Row {i + 1}'
+            x=x_points,
+            y=y_points,
+            z=z_points,
+            mode='markers+text',
+            marker=dict(size=5, color=color),
+            text=[f'{i}' for i in range(16)],  # Add IDs as labels
+            textposition='top center',
+            name=f"Control Points {batch_idx + 1}"
         ))
 
-    # Draw grid lines along columns
-    for j in range(4):  # Drawing column lines
-        fig.add_trace(go.Scatter3d(
-            x=x_points[j::4],
-            y=y_points[j::4],
-            z=z_points[j::4],
-            mode='lines',
-            line=dict(color='red', width=2),
-            name=f'Column {j + 1}'
-        ))
+        # Draw grid lines along rows
+        for i in range(4):  # Drawing row lines
+            fig.add_trace(go.Scatter3d(
+                x=x_points[i * 4:(i + 1) * 4],
+                y=y_points[i * 4:(i + 1) * 4],
+                z=z_points[i * 4:(i + 1) * 4],
+                mode='lines',
+                line=dict(color=color, width=2),
+                name=f'Row {i + 1} (Grid {batch_idx + 1})'
+            ))
+
+        # Draw grid lines along columns
+        for j in range(4):  # Drawing column lines
+            fig.add_trace(go.Scatter3d(
+                x=x_points[j::4],
+                y=y_points[j::4],
+                z=z_points[j::4],
+                mode='lines',
+                line=dict(color=color, width=2),
+                name=f'Column {j + 1} (Grid {batch_idx + 1})'
+            ))
 
     # Set the layout for the 3D plot
     fig.update_layout(
@@ -490,7 +499,7 @@ def draw_ctrs(ctrs):
             yaxis_title='Y Axis',
             zaxis_title='Z Axis',
         ),
-        title="Control Points, Grid Lines, and IDs",
+        title="Multiple Control Grids with IDs",
         showlegend=False
     )
 
