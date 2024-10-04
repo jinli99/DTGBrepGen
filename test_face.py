@@ -1,15 +1,13 @@
 import argparse
 import os
-import random
 from tqdm import tqdm
 import pickle
 import multiprocessing
-from multiprocessing import Pool
 from model import FaceGeomTransformer
 from diffusers import DDPMScheduler, PNDMScheduler
 from utils import (sort_bbox_multi, pad_and_stack, xe_mask)
 from OCC.Extend.DataExchange import write_step_file
-from brepBuild import (joint_optimize, joint_optimize_global, construct_brep, construct_brep_fit, Brep2Mesh,
+from brepBuild import (joint_optimize, construct_brep, Brep2Mesh,
                        create_bspline_surface, create_bspline_curve,
                        sample_bspline_surface, sample_bspline_curve)
 from visualization import *
@@ -155,13 +153,8 @@ def get_brep(args):
                                         face_bbox, vert_geom,
                                         edgeVert_adj, faceEdge_adj, len(edge_ncs), len(face_ncs))
 
-    # face_wcs = face_ncs
-    # edge_wcs = edge_ncs
-
-    # solid = construct_brep_fit(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
-
     try:
-        solid = construct_brep_fit(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
+        solid = construct_brep(face_wcs, edge_wcs, faceEdge_adj, edgeVert_adj)
     except Exception as e:
         print('B-rep rebuild failed...')
         return False
@@ -205,15 +198,14 @@ def main():
         batch_file = pickle.load(f)
 
     # batch_file = random.sample(batch_file, 8)
-    batch_file = ['table/partstudio_7568.pkl',
-                  'chair/assembly_0039_fix.pkl',
-                  'cabinet/partstudio_partstudio_3851.pkl',
+    batch_file = ['lamp/partstudio_0401.pkl',
+                  'lamp/partstudio_0442.pkl',
                   'lamp/partstudio_0394.pkl']
 
     b_each = 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
-        """****************Brep Topology****************"""
+        # =======================================Brep Topology=================================================== #
         datas = get_topology(batch_file[i:i + b_each], device)
         face_bbox, edgeVert_adj, edgeFace_adj, faceEdge_adj, vert_geom, edge_geom = (datas["face_bbox"],
                                                                                      datas["edgeVert_adj"],
@@ -226,12 +218,14 @@ def main():
         vert_geom = [i*args.bbox_scaled for i in vert_geom]                      # [nv*3, ...]
         edge_geom = [i * args.bbox_scaled for i in edge_geom]                    # [ne*12, ...]
 
-        """****************Face Geometry****************"""
-        face_geom, face_mask = get_faceGeom(face_bbox, vert_geom, edge_geom, edgeVert_adj,
-                                            faceEdge_adj, faceGeom_model, pndm_scheduler, ddpm_scheduler)  # b*nf*48, b*nf
+        # =======================================Face Geometry================================================== #
+        face_geom, face_mask = get_faceGeom(face_bbox, vert_geom,  edge_geom,
+                                            edgeVert_adj, faceEdge_adj, faceGeom_model,
+                                            pndm_scheduler,  ddpm_scheduler)     # b*nf*48, b*nf
+
         face_geom = [i[j] for i, j in zip(face_geom, face_mask)]
 
-        """****************Construct Brep****************"""
+        # =======================================Construct Brep================================================= #
         for j in range(b):
             solid = get_brep((face_geom[j].cpu().numpy() / args.bbox_scaled,
                               face_bbox[j].cpu().numpy() / args.bbox_scaled,
@@ -253,5 +247,4 @@ def main():
 
 
 if __name__ == '__main__':
-    multiprocessing.set_start_method('spawn', force=True)
     main()

@@ -2,8 +2,6 @@ import argparse
 import os
 from tqdm import tqdm
 import pickle
-from multiprocessing import Pool
-import multiprocessing
 from model import EdgeGeomTransformer, FaceGeomTransformer
 from diffusers import PNDMScheduler, DDPMScheduler
 from test_face import get_faceGeom, get_topology, get_brep
@@ -19,7 +17,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 def get_args_generate():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom_02/epoch_3000.pt')
+    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom_01/epoch_3000.pt')
     parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/geom_edgeGeom/epoch_3000.pt')
     parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
     parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
@@ -121,10 +119,12 @@ def main():
     with open('batch_file_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 
+    # batch_file = ['chair/partstudio_partstudio_0759.pkl']
+
     b_each = 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
-        """****************Brep Topology****************"""
+        # =======================================Brep Topology=================================================== #
         datas = get_topology(batch_file[i:i + b_each], device)
         face_bbox, edgeVert_adj, faceEdge_adj, edgeFace_adj, vert_geom = (datas["face_bbox"],
                                                                           datas["edgeVert_adj"],
@@ -135,32 +135,28 @@ def main():
         face_bbox = [sort_bbox_multi(i)*args.bbox_scaled for i in face_bbox]     # [nf*6, ...]
         vert_geom = [i*args.bbox_scaled for i in vert_geom]                      # [nv*3, ...]
 
-        """****************Edge Geometry****************"""
-        edge_geom, edge_mask = get_edgeGeom(face_bbox, vert_geom, edgeVert_adj, edgeFace_adj, edgeGeom_model,
+        # =======================================Edge Geometry================================================= #
+        edge_geom, edge_mask = get_edgeGeom(face_bbox, vert_geom,
+                                            edgeVert_adj, edgeFace_adj, edgeGeom_model,
                                             pndm_scheduler, ddpm_scheduler)
         edge_geom = [i[j] for i, j in zip(edge_geom, edge_mask)]                 # [ne*12, ...]
 
-        """****************Face Geometry****************"""
-        face_geom, face_mask = get_faceGeom(face_bbox, vert_geom, edge_geom, edgeVert_adj,
-                                            faceEdge_adj, faceGeom_model,
-                                            pndm_scheduler, ddpm_scheduler)     # b*nf*48, b*nf
+        # =======================================Face Geometry================================================= #
+        face_geom, face_mask = get_faceGeom(face_bbox, vert_geom, edge_geom,
+                                            edgeVert_adj, faceEdge_adj, faceGeom_model,
+                                            pndm_scheduler, ddpm_scheduler)      # b*nf*48, b*nf
         face_geom = [i[j] for i, j in zip(face_geom, face_mask)]
 
-        """****************Construct Brep****************"""
-        multiprocessing.set_start_method('spawn', force=True)
-        with Pool(processes=4) as pool:
-            args_list = [(face_geom[j].cpu().numpy() / args.bbox_scaled,
-                          face_bbox[j].cpu().numpy() / args.bbox_scaled,
-                          vert_geom[j].cpu().numpy() / args.bbox_scaled,
-                          edge_geom[j].cpu().numpy() / args.bbox_scaled,
-                          edgeFace_adj[j].cpu().numpy(),
-                          edgeVert_adj[j].cpu().numpy(),
-                          faceEdge_adj[j]) for j in range(b)]
-            results = pool.map(get_brep, args_list)
-            pool.close()
-            pool.join()
+        # =======================================Construct Brep================================================ #
+        for j in range(b):
+            solid = get_brep((face_geom[j].cpu().numpy() / args.bbox_scaled,
+                              face_bbox[j].cpu().numpy() / args.bbox_scaled,
+                              vert_geom[j].cpu().numpy() / args.bbox_scaled,
+                              edge_geom[j].cpu().numpy() / args.bbox_scaled,
+                              edgeFace_adj[j].cpu().numpy(),
+                              edgeVert_adj[j].cpu().numpy(),
+                              faceEdge_adj[j]))
 
-        for j, solid in enumerate(results):
             if solid is False:
                 continue
             save_name = datas['name'][j]

@@ -204,7 +204,7 @@ def fitcylinder(data, guess_angles=None):
 
         u = sum(np.dot(Y, Y) for Y in Ys) / n
         v = np.dot(A_hat, sum(np.dot(Y, Y) * Y for Y in Ys)) / np.trace(
-            np.dot(A_hat, A)
+            np.dot(A_hat, A) + 1e-08
         )
 
         return sum((np.dot(Y, Y) - u - 2 * np.dot(Y, v)) ** 2 for Y in Ys)
@@ -1032,6 +1032,27 @@ def project_to_plane(points, a, d):
     return projections
 
 
+from sklearn.linear_model import RANSACRegressor
+def fit_cylinder_ransac(points, min_samples=3, residual_threshold=0.1, max_trials=100):
+    # 提取点的坐标
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+
+    # 拟合圆柱轴线
+    X = np.column_stack((x, y))
+    model = RANSACRegressor(min_samples=min_samples, residual_threshold=residual_threshold, max_trials=max_trials)
+    model.fit(X, z)
+
+    # 获取轴线方向和一个点
+    direction = np.array([0, 0, 1])
+    point_on_axis = np.array([0, 0, model.predict([[0, 0]])[0]])
+
+    # 计算半径
+    distances = np.sqrt(np.sum((X - model.predict(X)[:, np.newaxis]) ** 2, axis=1))
+    radius = np.median(distances)
+
+    return direction, point_on_axis, radius
+
+
 def fit_basic_primitives(pts, weights):
     """
     output: a dict of reconstructed points of each fitting shape, residual error
@@ -1085,13 +1106,15 @@ def fit_basic_primitives(pts, weights):
     recon_basic_shapes["sphere_new_points"] = new_points.tolist()
     recon_basic_shapes["sphere_err"] = sphere_err.data.cpu().numpy().tolist()
 
-    #======================fit a cylinder====================
+    # ======================fit a cylinder====================
     a, center, radius = fitting.fit_cylinder(
         pts,
         normals=torch.zeros_like(pts),
         weights=weights,
         ids=None,
     )
+
+    # a, center, radius = fit_cylinder_ransac(pts.cpu().numpy())
 
     new_points, new_normals = fitting.sample_cylinder_trim(
         radius.item(),

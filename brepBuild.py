@@ -364,11 +364,11 @@ def joint_optimize(surf_ncs, edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, 
 
         edge_wcs_min, edge_wcs_max = get_bbox_minmax(edges_perface.reshape(-1, 3).detach().cpu().numpy())
         edge_wcs_center = (edge_wcs_min + edge_wcs_max) * 0.5
-        edge_wcs_size = edge_wcs_max - edge_wcs_min
+        edge_wcs_size = np.maximum(edge_wcs_max - edge_wcs_min, 1e-8)
 
         surf_ncs_min, surf_ncs_max = get_bbox_minmax(ncs.reshape(-1, 3))
         surf_ncs_center = (surf_ncs_min + surf_ncs_max) * 0.5
-        surf_ncs_size = surf_ncs_max - surf_ncs_min
+        surf_ncs_size = np.maximum(surf_ncs_max - surf_ncs_min, 1e-8)
         ncs -= surf_ncs_center
 
         bbox_size = bbox[3:] - bbox[0:3]
@@ -381,6 +381,7 @@ def joint_optimize(surf_ncs, edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, 
 
     # optimize the surface offset
     surf = torch.FloatTensor(surf_wcs_init).cuda()
+    surf_updated = 0
     for iters in range(200):
         surf_scale = model.surf_st[:, 0].reshape(-1, 1, 1, 1)
         surf_offset = model.surf_st[:, 1:].reshape(-1, 1, 1, 3)
@@ -394,7 +395,7 @@ def joint_optimize(surf_ncs, edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, 
         surf_loss /= len(surf_updated)
 
         optimizer.zero_grad()
-        (surf_loss).backward()
+        surf_loss.backward()
         optimizer.step()
 
         # print(f'Iter {iters} surf:{surf_loss:.5f}')
@@ -402,77 +403,6 @@ def joint_optimize(surf_ncs, edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, 
     surf_wcs = surf_updated.detach().cpu().numpy()
 
     return surf_wcs, edge_wcs
-
-
-def joint_optimize_global(surf_ncs, edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, FaceEdgeAdj, num_edge, num_surf):
-    """
-    Jointly optimize the face/edge/vertex based on topology
-    """
-    loss_func = ChamferDistance()
-
-    model = STModel(num_edge, num_surf)
-    model = model.cuda().train()
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=1e-3,
-        betas=(0.95, 0.999),
-        weight_decay=1e-6,
-        eps=1e-08,
-    )
-
-    edge_wcs = edge_ncs
-
-    # Optimize surfaces
-    face_edges = []
-    for adj in FaceEdgeAdj:
-        all_pnts = edge_wcs[adj]
-        face_edges.append(torch.FloatTensor(all_pnts).cuda())
-
-    # Initialize surface in wcs
-    surf_wcs_init = []
-    for edges_perface, ncs in zip(face_edges, surf_ncs):
-
-        edge_wcs_min, edge_wcs_max = get_bbox_minmax(edges_perface.reshape(-1, 3).detach().cpu().numpy())
-        edge_wcs_center = (edge_wcs_min + edge_wcs_max) * 0.5
-        edge_wcs_size = edge_wcs_max - edge_wcs_min
-
-        surf_ncs_min, surf_ncs_max = get_bbox_minmax(ncs.reshape(-1, 3))
-        surf_ncs_center = (surf_ncs_min + surf_ncs_max) * 0.5
-        surf_ncs_size = surf_ncs_max - surf_ncs_min
-        ncs -= surf_ncs_center
-
-        scale_size = (edge_wcs_size / surf_ncs_size).max()
-        if scale_size < 1:
-            wcs = ncs + edge_wcs_center
-        else:
-            wcs = ncs * scale_size * 1.05 + edge_wcs_center
-        surf_wcs_init.append(wcs)
-
-    surf_wcs_init = np.stack(surf_wcs_init)
-
-    # optimize the surface offset
-    surf = torch.FloatTensor(surf_wcs_init).cuda()
-    for iters in range(200):
-        surf_scale = model.surf_st[:, 0].reshape(-1, 1, 1, 1)
-        surf_offset = model.surf_st[:, 1:].reshape(-1, 1, 1, 3)
-        surf_updated = surf + surf_offset
-
-        surf_loss = 0
-        for surf_pnt, edge_pnts in zip(surf_updated, face_edges):
-            surf_pnt = surf_pnt.reshape(-1, 3)
-            edge_pnts = edge_pnts.reshape(-1, 3).detach()
-            surf_loss += loss_func(surf_pnt.unsqueeze(0), edge_pnts.unsqueeze(0), bidirectional=False, reverse=True)
-        surf_loss /= len(surf_updated)
-
-        optimizer.zero_grad()
-        (surf_loss).backward()
-        optimizer.step()
-
-        # print(f'Iter {iters} surf:{surf_loss:.5f}')
-
-    surf_wcs = surf_updated.detach().cpu().numpy()
-
-    return (surf_wcs, edge_wcs)
 
 
 def fix_wires(face, debug=False):
@@ -541,61 +471,21 @@ def project_point_on_surface(point, surface):
         return point
 
 
-def optimize_edge(edge_wcs, edgeFace_adj, faces):
-    """
-    Optimize the edge points by projecting onto adjacent faces and averaging.
-
-    Args:
-        edge_wcs:     (ne, 32, 3) array of edge points (sampled points per edge).
-        edgeFace_adj: (ne, 2) array of edge-face adjacency. Each row contains two face IDs.
-        faces:        List of OCC.Core.Geom surfaces (faces).
-
-    Returns:
-        edge_wcs_update: (ne, 32, 3) updated edge points after projection and averaging.
-    """
-    ne = edge_wcs.shape[0]  # Number of edges
-    edge_wcs_update = np.zeros_like(edge_wcs)
-
-    # Iterate over each edge
-    for i in range(ne):
-        # Get the two adjacent face IDs
-        face_id1, face_id2 = edgeFace_adj[i]
-        face1 = faces[face_id1]
-        face2 = faces[face_id2]
-
-        edge_wcs_update[i, 0] = edge_wcs[i, 0]
-        edge_wcs_update[i, -1] = edge_wcs[i, -1]
-
-        # Iterate over each sampled point on the edge
-        for j in range(1, 31):
-            point = edge_wcs[i, j]
-
-            # Project the point onto both adjacent faces
-            proj_pnt1 = project_point_on_surface(point, face1)
-            proj_pnt2 = project_point_on_surface(point, face2)
-
-            # Average the projected points to get the updated point
-            edge_wcs_update[i, j] = (proj_pnt1 + proj_pnt2) / 2
-
-    return edge_wcs_update
-
-
 def fit_basic_surface(outer_points, inner_points):
     """
     Args:
-        args: outer_points ne*32*3 and inner_points 32*32*3
+        outer_points: ne*32*3
+        inner_points: 32*32*3
     """
     # outer_points, inner_points = args
-    indices = np.linspace(0, outer_points.shape[1] - 1, 8, dtype=int)
+    indices = np.linspace(0, outer_points.shape[1] - 1, 16, dtype=int)
     outer_points = np.array([outer_points[i][indices] for i in range(outer_points.shape[0])])
     outer_points = outer_points.reshape(-1, 3)
     b = outer_points.shape[0]
     inner_points = inner_points.reshape(-1, 3)
-    inner_points = inner_points[np.random.choice(inner_points.shape[0], b, replace=False)]
-    out = process_one_surface(np.concatenate([inner_points, outer_points]),
-                              device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                              weights=np.array([0.5] * inner_points.shape[0] + [1.0] * b).reshape(
-                                  -1, 1))
+    inner_points = inner_points[np.random.choice(inner_points.shape[0], 2, replace=False)]
+    out = process_one_surface(np.concatenate([outer_points]),
+                              device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     if out['err'] < 0.01:
         if out['type'] == 'plane':
             direction, distance = out['params']
@@ -627,7 +517,7 @@ def fit_basic_surface(outer_points, inner_points):
         return None
 
 
-def construct_brep_fit(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
+def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     """
     Fit parametric surfaces / curves and trim into B-rep
     """
@@ -650,8 +540,6 @@ def construct_brep_fit(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
                     uv_points_array.SetValue(u_index, v_index, point_3d)
             approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 8, GeomAbs_C2, 5e-2).Surface()
         recon_faces.append(approx_face)
-
-    # edge_wcs = optimize_edge(edge_wcs, face_edge_trans(faceEdge_adj=FaceEdgeAdj), recon_faces)
 
     recon_edges = []
     for points in edge_wcs:
@@ -781,189 +669,6 @@ def construct_brep_fit(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
         post_faces.append(face_occ)
 
         # """Jing Test 2024/06/16"""
-        # from OCC.Core.TopExp import TopExp_Explorer
-        # from OCC.Core.TopAbs import TopAbs_EDGE
-        # from OCC.Display.SimpleGui import init_display
-        # display, start_display, add_menu, add_function_to_menu = init_display()
-        # display.DisplayShape(face_occ, color='BLUE', update=True)
-        # # 创建一个explorer来遍历面上的边缘(edges)
-        # edge_explorer = TopExp_Explorer(face_occ, TopAbs_EDGE)
-        # # 遍历并显示每一边
-        # ii = 0
-        # while edge_explorer.More():
-        #     edge = edge_explorer.Current()
-        #     display.DisplayShape(edge, color='RED', update=True)
-        #     edge_explorer.Next()
-        #     ii += 1
-        # # 开始交互式事件循环
-        # print("number of edges:", ii)
-        # start_display()
-        # print(111)
-
-    # Sew faces into solid
-    sewing = BRepBuilderAPI_Sewing()
-    for face in post_faces:
-        sewing.Add(face)
-
-    # Perform the sewing operation
-    sewing.Perform()
-    sewn_shell = sewing.SewedShape()
-
-    # Make a solid from the shell
-    maker = BRepBuilderAPI_MakeSolid()
-    maker.Add(sewn_shell)
-    maker.Build()
-    solid = maker.Solid()
-
-    return solid
-
-
-def construct_brep(surf_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
-    """
-    Fit parametric surfaces / curves and trim into B-rep
-    """
-    print('Building the B-rep...')
-    # Fit surface bspline
-    recon_faces = []
-    for points in surf_wcs:
-        num_u_points, num_v_points = points.shape[0], points.shape[1]
-        uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
-        for u_index in range(1, num_u_points + 1):
-            for v_index in range(1, num_v_points + 1):
-                pt = points[u_index - 1, v_index - 1]
-                point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
-                uv_points_array.SetValue(u_index, v_index, point_3d)
-        approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 8, GeomAbs_C2, 5e-2).Surface()
-        recon_faces.append(approx_face)
-
-    recon_edges = []
-    for points in edge_wcs:
-        num_u_points = points.shape[0]
-        u_points_array = TColgp_Array1OfPnt(1, num_u_points)
-        for u_index in range(1, num_u_points + 1):
-            pt = points[u_index - 1]
-            point_2d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
-            u_points_array.SetValue(u_index, point_2d)
-        try:
-            approx_edge = GeomAPI_PointsToBSpline(u_points_array, 0, 8, GeomAbs_C2, 5e-3).Curve()
-        except Exception as e:
-            print('high precision failed, trying mid precision...')
-            try:
-                approx_edge = GeomAPI_PointsToBSpline(u_points_array, 0, 8, GeomAbs_C2, 8e-3).Curve()
-            except Exception as e:
-                print('mid precision failed, trying low precision...')
-                approx_edge = GeomAPI_PointsToBSpline(u_points_array, 0, 8, GeomAbs_C2, 5e-2).Curve()
-        recon_edges.append(approx_edge)
-
-    # Create edges from the curve list
-    edge_list = []
-    for curve in recon_edges:
-        edge = BRepBuilderAPI_MakeEdge(curve).Edge()
-        edge_list.append(edge)
-
-    # Cut surface by wire
-    post_faces = []
-    post_edges = []
-    for idx, (surface, edge_incides) in enumerate(zip(recon_faces, FaceEdgeAdj)):
-
-        # """Jing Test 2024/06/16"""
-        # print("number of edges:", len(edge_incides))
-        # from OCC.Display.SimpleGui import init_display
-        # display, start_display, add_menu, add_function_to_menu = init_display()
-        # display.DisplayShape(surface, update=True, color='BLUE')  # 以蓝色显示面
-        # for i in edge_incides:
-        #     display.DisplayShape(edge_list[i], update=True, color='RED')  # 以红色显示边
-        # start_display()
-        # """*******************"""
-
-        corner_indices = EdgeVertexAdj[edge_incides]
-
-        # ordered loop
-        loops = []
-        ordered = [0]
-        seen_corners = [corner_indices[0, 0], corner_indices[0, 1]]
-        next_index = corner_indices[0, 1]
-
-        while len(ordered) < len(corner_indices):
-            while True:
-                next_row = [idx for idx, edge in enumerate(corner_indices) if next_index in edge and idx not in ordered]
-                if len(next_row) == 0:
-                    break
-                ordered += next_row
-                next_index = list(set(corner_indices[next_row][0]) - set(seen_corners))
-                if len(next_index) == 0:
-                    break
-                else:
-                    next_index = next_index[0]
-                seen_corners += [corner_indices[next_row][0][0], corner_indices[next_row][0][1]]
-
-            cur_len = int(np.array([len(x) for x in loops]).sum())  # add to inner / outer loops
-            loops.append(ordered[cur_len:])
-
-            # Swith to next loop
-            next_corner = list(set(np.arange(len(corner_indices))) - set(ordered))
-            if len(next_corner) == 0:
-                break
-            else:
-                next_corner = next_corner[0]
-            next_index = corner_indices[next_corner][0]
-            ordered += [next_corner]
-            seen_corners += [corner_indices[next_corner][0], corner_indices[next_corner][1]]
-            next_index = corner_indices[next_corner][1]
-
-        # Determine the outer loop by bounding box length (?)
-        bbox_spans = [get_bbox_norm(edge_wcs[x].reshape(-1, 3)) for x in loops]
-
-        # Create wire from ordered edges
-        _edge_incides_ = [edge_incides[x] for x in ordered]
-        edge_post = [edge_list[x] for x in _edge_incides_]
-        post_edges += edge_post
-
-        out_idx = np.argmax(np.array(bbox_spans))
-        inner_idx = list(set(np.arange(len(loops))) - set([out_idx]))
-
-        # Outer wire
-        wire_builder = BRepBuilderAPI_MakeWire()
-        for edge_idx in loops[out_idx]:
-            wire_builder.Add(edge_list[edge_incides[edge_idx]])
-        outer_wire = wire_builder.Wire()
-
-        # Inner wires
-        inner_wires = []
-        for idx_ in inner_idx:
-            wire_builder = BRepBuilderAPI_MakeWire()
-            for edge_idx in loops[idx_]:
-                wire_builder.Add(edge_list[edge_incides[edge_idx]])
-            inner_wires.append(wire_builder.Wire())
-
-        # Cut by wires
-        face_builder = BRepBuilderAPI_MakeFace(surface, outer_wire)
-        for wire in inner_wires:
-            face_builder.Add(wire)
-        face_occ = face_builder.Shape()
-
-        fix_wires(face_occ)
-        add_pcurves_to_edges(face_occ)
-        fix_wires(face_occ)
-        face_occ = fix_face(face_occ)
-
-        # """Jing Test 2024/09/21"""
-        # analyzer = BRepCheck_Analyzer(face_occ)
-        # if not analyzer.IsValid():
-        #     fixer = ShapeFix_Shape(face_occ)
-        #     fixer.Perform()
-        #     print(idx, type(fixer.Shape()))
-        #     if isinstance(face_occ, TopoDS_Face):
-        #         face_occ = fixer.Shape()
-        #         explorer = TopExp_Explorer(face_occ, TopAbs_FACE)
-        #         while explorer.More():
-        #             post_faces.append(topods_Face(explorer.Current()))
-        #             explorer.Next()
-        #         continue
-
-        post_faces.append(face_occ)
-
-        # # """Jing Test 2024/06/16"""
         # from OCC.Core.TopExp import TopExp_Explorer
         # from OCC.Core.TopAbs import TopAbs_EDGE
         # from OCC.Display.SimpleGui import init_display

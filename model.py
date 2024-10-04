@@ -1720,14 +1720,6 @@ class FaceGeomTransformer(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim),
         )
 
-        # self.coord_embed = nn.Sequential(nn.Linear(3, self.embed_dim // 16),
-        #                                  nn.LayerNorm(self.embed_dim // 16),
-        #                                  nn.SiLU(),
-        #                                  )
-        # self.u_embed = nn.Embedding(4, self.embed_dim // 16)
-        # self.v_embed = nn.Embedding(4, self.embed_dim // 16)
-        # self.geom_out = nn.Linear(self.embed_dim, self.embed_dim)
-
         self.face_bbox_embed = nn.Sequential(
             nn.Linear(6, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
@@ -1763,22 +1755,6 @@ class FaceGeomTransformer(nn.Module):
             nn.Linear(self.embed_dim, face_geom_dim),
         )
 
-    # def face_geom_embed(self, x_t):
-    #     """
-    #         Args:
-    #             x_t: [batch_size, nf, 48]
-    #         Returns:
-    #             Noise prediction with shape [batch_size, nf, embed_dim]
-    #     """
-    #     face_geom_embeds = x_t.reshape([x_t.shape[0], x_t.shape[1], 16, 3])     # b*nf*16*3
-    #     face_geom_embeds = self.coord_embed(face_geom_embeds)                   # b*nf*16*48
-    #     u_embeds = self.u_embed(torch.tensor([0]*4+[1]*4+[2]*4+[3]*4, device=x_t.device).long())     # 16*48
-    #     v_embeds = self.v_embed(torch.tensor([0, 1, 2, 3]*4, device=x_t.device).long())              # 16*48
-    #     face_geom_embeds += (u_embeds + v_embeds).unsqueeze(0).unsqueeze(0) * 0.5                    # b*nf*16*48
-    #     face_geom_embeds = self.geom_out(face_geom_embeds.flatten(2, 3))                             # b*nf*768
-    #
-    #     return face_geom_embeds
-
     def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, t):
         """
             Args:
@@ -1796,6 +1772,7 @@ class FaceGeomTransformer(nn.Module):
 
         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
         face_bbox_embeds = self.face_bbox_embed(face_bbox)                    # b*nf*embed_dim
+        # face_bbox_embeds = 0
         face_geom_embeds = self.face_geom_embed(x_t)                          # b*nf*embed_dim
 
         faceVert_embeds = self.faceVert_embed(faceVert_geom)                  # b*nf*fv*embed_dim

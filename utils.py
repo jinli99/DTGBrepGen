@@ -111,26 +111,50 @@ def pad_and_stack(inputs, max_n=None):
 
 
 def pad_zero(x, max_len, dim=0):
-    """padding for x with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces, ...)"""
+    """Padding for x with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces, ...)"""
 
-    assert x.shape[0] <= max_len
+    if isinstance(x, np.ndarray):
+        assert x.shape[0] <= max_len
 
-    if dim == 0:
-        total = np.zeros((max_len, *x.shape[1:]), dtype=x.dtype)
-        total[:x.shape[0]] = x
-        mask = np.zeros(max_len, dtype=np.bool_)
-        mask[:x.shape[0]] = True
-    elif dim == 1:
-        assert x.shape[0] == x.shape[1]
-        if len(x.shape) > 2:
-            total = np.zeros((max_len, max_len, *x.shape[2:]), dtype=x.dtype)
+        if dim == 0:
+            total = np.zeros((max_len, *x.shape[1:]), dtype=x.dtype)
+            total[:x.shape[0]] = x
+            mask = np.zeros(max_len, dtype=np.bool_)
+            mask[:x.shape[0]] = True
+        elif dim == 1:
+            assert x.shape[0] == x.shape[1]
+            if len(x.shape) > 2:
+                total = np.zeros((max_len, max_len, *x.shape[2:]), dtype=x.dtype)
+            else:
+                total = np.zeros((max_len, max_len), dtype=x.dtype)
+            total[:x.shape[0], :x.shape[0], ...] = x
+            mask = np.zeros(max_len, dtype=np.bool_)
+            mask[:x.shape[0]] = True
         else:
-            total = np.zeros((max_len, max_len), dtype=x.dtype)
-        total[:x.shape[0], :x.shape[0], ...] = x
-        mask = np.zeros(max_len, dtype=np.bool_)
-        mask[:x.shape[0]] = True
+            raise ValueError("dim must be 0 or 1 for numpy array")
+
+    elif isinstance(x, torch.Tensor):
+        assert x.shape[0] <= max_len
+
+        if dim == 0:
+            total = torch.zeros((max_len, *x.shape[1:]), dtype=x.dtype, device=x.device)
+            total[:x.shape[0]] = x
+            mask = torch.zeros(max_len, dtype=torch.bool, device=x.device)
+            mask[:x.shape[0]] = True
+        elif dim == 1:
+            assert x.shape[0] == x.shape[1]
+            if len(x.shape) > 2:
+                total = torch.zeros((max_len, max_len, *x.shape[2:]), dtype=x.dtype, device=x.device)
+            else:
+                total = torch.zeros((max_len, max_len), dtype=x.dtype, device=x.device)
+            total[:x.shape[0], :x.shape[0], ...] = x
+            mask = torch.zeros(max_len, dtype=torch.bool, device=x.device)
+            mask[:x.shape[0]] = True
+        else:
+            raise ValueError("dim must be 0 or 1 for torch tensor")
+
     else:
-        raise ValueError
+        raise TypeError("Input x must be a numpy array or a torch tensor")
 
     return total, mask
 
