@@ -247,6 +247,7 @@ class GraphFeatures:
     def __call__(self, e, node_mask):
         n = node_mask.sum(dim=1).unsqueeze(1) / self.max_n_nodes
         x_cycles, y_cycles = self.n_cycles(e, node_mask)       # (bs, n_cycles)
+        # x_cycles, y_cycles = 0, 0
 
         if self.features_type == 'cycles':
             extra_edge_attr = torch.zeros((*e.shape[:-1], 0)).type_as(e)

@@ -295,8 +295,8 @@ def parse_solid(solid):
     assert isinstance(solid, Solid)
 
     # Split closed surface and closed curve to halve
-    solid = solid.split_all_closed_faces(num_splits=0)
-    solid = solid.split_all_closed_edges(num_splits=0)
+    solid = solid.split_all_closed_faces(num_splits=2)
+    solid = solid.split_all_closed_edges(num_splits=2)
 
     if len(list(solid.faces())) > MAX_FACE:
         return None
@@ -355,7 +355,7 @@ def parse_solid(solid):
         'faceEdge_adj': faceEdge_IncM,
         'face_bbox_wcs': face_bboxes.astype(np.float32),
         'edge_bbox_wcs': edge_bboxes.astype(np.float32),
-        'corner_unique': corner_unique.astype(np.float32),
+        'vert_wcs': corner_unique.astype(np.float32),
     }
 
     return data
@@ -448,7 +448,7 @@ def process(step_folder, print_error=False):
         vv_list = construct_vv_list(data['edgeVert_adj'])
         data['vv_list'] = vv_list
 
-        nv = data['corner_unique'].shape[0]
+        nv = data['vert_wcs'].shape[0]
         vertex_edge_dict = {i: [] for i in range(nv)}
         for edge_id, (v1, v2) in enumerate(data['edgeVert_adj']):
             vertex_edge_dict[v1].append(edge_id)
@@ -457,7 +457,7 @@ def process(step_folder, print_error=False):
         vertex_edge = [vertex_edge_dict[i] for i in range(nv)]    # list[[edge_1, edge_2,...],...]
         # list[[face_1, face_2,...], ...]
         vertexFace = [np.unique(data['edgeFace_adj'][i].reshape(-1)).tolist() for i in vertex_edge]
-        data['vertexFace'] = vertexFace
+        data['vertFace_adj'] = vertexFace
 
         save_path = os.path.join(save_folder, data['uid'] + '.pkl')
         with open(save_path, "wb") as tf:
@@ -713,8 +713,8 @@ if __name__ == '__main__':
     #     step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
     #
     # # Process B-reps in parallel
-    # for i in tqdm(step_dirs):
-    #     process(i)
+    # # for i in tqdm(step_dirs):
+    # #     process(i)
     # valid = 0
     # convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
     # for status in tqdm(convert_iter, total=len(step_dirs)):

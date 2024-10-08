@@ -12,7 +12,7 @@ def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
                                                    data['edge_bbox_wcs'], data['fef_adj'])
 
     # Skip complex faces and complex edges
-    if data['face_ctrs'] is None or data['edge_ctrs'] is None:
+    if data['edge_ctrs'] is None:
         return False
 
     # Check Topology
@@ -25,6 +25,11 @@ def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
         num_vertices = len(vertices)
         if num_edges != num_vertices:
             return False
+
+    sorted_edges = np.sort(edgeVert_adj, axis=1)
+    unique_edges = np.unique(sorted_edges, axis=0)
+    if unique_edges.shape[0] < edgeVert_adj.shape[0]:
+        return False
 
     # Skip over max edge-classes
     if fef_adj.max() >= edge_classes:
@@ -111,7 +116,7 @@ def pad_and_stack(inputs, max_n=None):
 
 
 def pad_zero(x, max_len, dim=0):
-    """Padding for x with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces, ...)"""
+    """Padding for face with shape (num_faces, dim1, ...) and edge with shape(num_faces, num_faces, ...)"""
 
     if isinstance(x, np.ndarray):
         assert x.shape[0] <= max_len

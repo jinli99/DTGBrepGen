@@ -12,7 +12,7 @@ import numpy as np
 def create_parser():
     """Create the base argument parser"""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, default='furniture_parsed', help="Data folder path or CAD .pkl file")
+    parser.add_argument("--data", type=str, default='data_process/GeomDatasets/furniture_parsed', help="Data folder path or CAD .pkl file")
     parser.add_argument("--bit", type=int, default=6, help='Deduplicate precision')
     parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='furniture',
                         help="Choose between dataset options: [abc/deepcad/furniture]")
@@ -157,7 +157,7 @@ def save_unique_data(save_path, unique_data):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", type=str, choices=['cad', 'facEdge'],
-                        default='facEdge', help="Specify which function to call")
+                        default='cad', help="Specify which function to call")
     args, unknown = parser.parse_known_args()
 
     if args.name == 'cad':

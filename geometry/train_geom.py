@@ -21,21 +21,20 @@ def get_args_geom():
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='faceGeom',)
+        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='vertGeom',)
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
-    parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
+    parser.add_argument('--train_epochs', type=int, default=1000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
     parser.add_argument('--timesteps', type=int, default=500, help='diffusion timesteps')
     parser.add_argument('--max_face', type=int, default=50, help='maximum number of faces')
     parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
     parser.add_argument('--max_num_edge', type=int, default=100, help='maximum number of edges per brep')
-    parser.add_argument('--max_vertex', type=int, default=100, help='maximum number of vertices per brep')
-    parser.add_argument('--max_vertexFace', type=int, default=5, help='maximum number of faces each vertex')
+    parser.add_argument('--max_vert', type=int, default=100, help='maximum number of vertices per brep')
     parser.add_argument('--threshold', type=float, default=0.05, help='minimum threshold between two faces')
     parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
     parser.add_argument('--z_scaled', type=float, default=1, help='scaled the latent z')
@@ -44,7 +43,7 @@ def get_args_geom():
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
     parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_geom_faceGeom", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_geom_vertGeom", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -83,8 +82,7 @@ def compute_dataset_info(args):
                 node_distribution[fef_adj.shape[0]] += 1
 
     args.max_num_edge = max_num_edge
-    args.max_vertex = max_vertex
-    args.max_vertexFace = max_vertexFace
+    args.max_vert = max_vertex
 
     assert min(integer_counts.keys()) == 0
     if args.edge_classes == -1:

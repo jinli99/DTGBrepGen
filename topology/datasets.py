@@ -140,7 +140,7 @@ def create_topo_datasets(data_type='train'):
         if not check_step_ok(path):
             return 0
 
-        with open(os.path.join('../data_process/furniture_parsed', path), 'rb') as f:
+        with open(os.path.join('../data_process/GeomDatasets/furniture_parsed', path), 'rb') as f:
             datas = pickle.load(f)
 
         data = {'name': path.replace('/', '_').replace('.pkl', '')}

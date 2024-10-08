@@ -60,7 +60,7 @@ def get_topology(files, device):
     edgeFace_adj = []
     vv_list = []
     for file in files:
-        with open(os.path.join('data_process/furniture_parsed', file), 'rb') as tf:
+        with open(os.path.join('data_process/GeomDatasets/furniture_parsed', file), 'rb') as tf:
             data = pickle.load(tf)
         e.append(data['fef_adj'])                    # [nf*nf, ***]
         edgeVert_adj.append(data['edgeVert_adj'])  # [ne*2, ...]
