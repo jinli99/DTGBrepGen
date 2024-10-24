@@ -17,6 +17,7 @@ from trimesh.sample import sample_surface
 from plyfile import PlyData, PlyElement
 import numpy as np
 from utils import check_step_ok, load_data_with_prefix
+from functools import partial
 
 
 def write_ply(points, filename, text=False):
@@ -51,8 +52,8 @@ class SamplePoints:
         :return: parser
         """
         parser = argparse.ArgumentParser(description='Scale a set of meshes stored as OFF files.')
-        parser.add_argument('--in_dir', type=str, default='samples/bug2', help='Path to input directory.')
-        parser.add_argument('--out_dir', type=str, default='comparison/point_cloud/furniture/test_edge_02', help='Path to output directory; files within are overwritten!')
+        parser.add_argument('--in_dir', type=str, default='/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/reference_test/0000', help='Path to input directory.')
+        parser.add_argument('--out_dir', type=str, default='/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/reference_test/0000', help='Path to output directory; files within are overwritten!')
         return parser
 
     def run_parallel(self, path):
@@ -74,71 +75,87 @@ class SamplePoints:
 
         shape_paths = load_data_with_prefix(self.options.in_dir,
                                             '.stl')  # + load_data_with_prefix(self.options.in_dir, '.obj')
-        random.shuffle(shape_paths)
-        shape_paths = shape_paths
-        for path in shape_paths:
-            self.run_parallel(path)
-        # num_cpus = multiprocessing.cpu_count()
-        # convert_iter = multiprocessing.Pool(num_cpus).imap(self.run_parallel, shape_paths)
-        # for _ in tqdm(convert_iter, total=len(shape_paths)):
-        #     pass
+
+        # shape_paths = shape_paths
+        # for path in shape_paths:
+        #     self.run_parallel(path)
+
+        num_cpus = multiprocessing.cpu_count()
+        convert_iter = multiprocessing.Pool(num_cpus).imap(self.run_parallel, shape_paths)
+        for _ in tqdm(convert_iter, total=len(shape_paths)):
+            pass
+
+
+def step2stl(file, option='deepcad'):
+
+    with open(os.path.join('data_process/GeomDatasets', option+'_parsed', file), 'rb') as f:
+        data = pickle.load(f)
+        if not check_step_ok(data):
+            return 0
+
+    parts = file.split('/')
+    temp = parts[1].split('_', 1)
+
+    if option == 'furniture':
+        step_path = os.path.join('/home/jing/Datasets/Furniture/', parts[0], temp[0], temp[1].split('.')[0]+'.step')
+    elif option == 'deepcad':
+        step_path = os.path.join('/home/jing/Datasets/DeepCAD/', parts[0], parts[1].split('.')[0] + '.step')
+    else:
+        assert option == 'abc'
+
+    solid = load_step(step_path)[0]
+    solid = solid.split_all_closed_faces(num_splits=0)
+    solid = solid.split_all_closed_edges(num_splits=0)
+    bbox = Bnd_Box()
+    brepbndlib_Add(solid._shape, bbox)
+    xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+    max_dim = max(xmax - xmin, ymax - ymin, zmax - zmin)
+    scale_factor = 2.0 / max_dim
+
+    trsf = gp_Trsf()
+    trsf.SetTranslationPart(gp_Vec(-(xmin + xmax) / 2.0, -(ymin + ymax) / 2.0, -(zmin + zmax) / 2.0))
+    solid = BRepBuilderAPI_Transform(solid._shape, trsf).Shape()
+
+    trsf = gp_Trsf()
+    trsf.SetScaleFactor(scale_factor)
+    solid = BRepBuilderAPI_Transform(solid, trsf).Shape()
+    bbox = Bnd_Box()
+    brepbndlib_Add(solid, bbox)
+    xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+    assert max(xmin, ymin, zmin, xmax, ymax, zmax) < 1.1 and min(xmin, ymin, zmin, xmax, ymax, zmax) > -1.1
+
+    try:
+        if option == 'furniture':
+            write_stl_file(
+                solid,
+                os.path.join('comparison/datas/furniture/reference', parts[0] + '_' + parts[1].split('.')[0] + '.stl'),
+                linear_deflection=0.001, angular_deflection=0.5)
+        elif option == 'deepcad':
+            os.makedirs(os.path.join('comparison/datas/deepcad/reference', parts[0]), exist_ok=True)
+            write_stl_file(
+                solid,
+                os.path.join('comparison/datas/deepcad/reference', parts[0], parts[1].split('.')[0] + '.stl'),
+                linear_deflection=0.001, angular_deflection=0.5)
+        return 1
+    except Exception as e:
+        return 0
 
 
 def get_reference_stl():
-    with open('../data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
-        files = pickle.load(tf)['test']
+    with open('data_process/deepcad_data_split_6bit.pkl', 'rb') as tf:
+        files = pickle.load(tf)['train']
 
-    random.shuffle(files)
-
-    def step2stl(file):
-
-        if not check_step_ok(file):
-            return 0
-
-        parts = file.split('/')
-        temp = parts[1].split('_', 1)
-        step_path = os.path.join('/home/jing/Datasets/furniture_dataset/', parts[0], temp[0], temp[1].split('.')[0]+'.step')
-
-        solid = load_step(step_path)[0]
-        solid = solid.split_all_closed_faces(num_splits=0)
-        solid = solid.split_all_closed_edges(num_splits=0)
-        bbox = Bnd_Box()
-        brepbndlib_Add(solid._shape, bbox)
-        xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
-        max_dim = max(xmax - xmin, ymax - ymin, zmax - zmin)
-        scale_factor = 2.0 / max_dim
-
-        trsf = gp_Trsf()
-        trsf.SetTranslationPart(gp_Vec(-(xmin + xmax) / 2.0, -(ymin + ymax) / 2.0, -(zmin + zmax) / 2.0))
-        solid = BRepBuilderAPI_Transform(solid._shape, trsf).Shape()
-
-        trsf = gp_Trsf()
-        trsf.SetScaleFactor(scale_factor)
-        solid = BRepBuilderAPI_Transform(solid, trsf).Shape()
-        bbox = Bnd_Box()
-        brepbndlib_Add(solid, bbox)
-        xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
-        assert max(xmin, ymin, zmin, xmax, ymax, zmax) < 1.1 and min(xmin, ymin, zmin, xmax, ymax, zmax) > -1.1
-
-        try:
-            write_stl_file(
-                solid,
-                os.path.join('point_cloud/furniture/reference/stl', parts[0] + '_' + parts[1].split('.')[0] + '.stl'),
-                linear_deflection=0.001, angular_deflection=0.5)
-            return 1
-        except Exception as e:
-            return 0
-
-    # convert_iter = Pool(os.cpu_count()).imap(step2stl, files[:1200])
-    # valid = 0
-    # for status in tqdm(convert_iter, total=len(files[:1200])):
-    #     print(status)
-    #     valid += status
+    option = 'deepcad'
 
     valid = 0
-    for file in tqdm(files[:1200]):
-        # print(file)
-        valid += step2stl(file)
+    process_with_option = partial(step2stl, option=option)
+    convert_iter = Pool(os.cpu_count()).imap(process_with_option, files)
+    for status in tqdm(convert_iter, total=len(files)):
+        valid += status
+
+    # valid = 0
+    # for file in tqdm(files):
+    #     valid += step2stl(file, option=option)
 
     print(valid)
 

@@ -1,34 +1,27 @@
-datasets:
-  furniture:
-    general:
-      max_face: 150
-      max_edge: 300
-    model:
-      n_layer: 5
-      d_model: 256
-
-  deepcad:
-    general:
-      max_face: 100
-      max_edge: 200
-    model:
-      n_layer: 4
-      d_model: 128
-
-  abc:
-    general:
-      max_face: 200
-      max_edge: 400
-    model:
-      n_layer: 6
-      d_model: 512
+furniture:
+  general:
+    max_face: 32
+    max_edge: 30
+    edge_classes: 5
+  datasets:
 
 
+  model:
+    n_layer: 5
+    d_model: 256
 
-#def load_config(dataset_name, config_file='config.yaml'):
-#    # 加载 yaml 文件
-#    with open(config_file, 'r') as file:
-#        config = yaml.safe_load(file)
-#
-#    # 根据 dataset_name 获取对应的参数
-#    dataset_config = config['datasets'].get(dataset_name)
+deepcad:
+  general:
+    max_face: 30
+    max_edge: 200
+  model:
+    n_layer: 4
+    d_model: 128
+
+abc:
+  general:
+    max_face: 200
+    max_edge: 400
+  model:
+    n_layer: 6
+    d_model: 512

@@ -19,6 +19,8 @@ from torch.nn.modules.normalization import LayerNorm
 from torch.nn import functional as ff
 from torch import Tensor
 from torch_geometric.nn import GCNConv
+from torch_geometric.data import Data, Batch
+from torch_geometric.nn import GATConv
 from utils import xe_mask, assert_correctly_masked, masked_softmax, pad_and_stack
 from topology.transfer import edge_vert_trans
 
@@ -1121,7 +1123,7 @@ class FaceGeomTransformerLayer(nn.Module):
         dropout: dropout probability. 0 to disable
         layer_norm_eps: eps value in layer normalizations.
     """
-    def __init__(self, dx: int, de: int, n_head: int, dim_ffX: int = 2048,
+    def __init__(self, dx: int, de: int, n_head: int, dim_ffX: int = 512,
                  dim_ffE: int = 128, dim_ffy: int = 2048, dropout: float = 0.1,
                  layer_norm_eps: float = 1e-5, device=None, dtype=None) -> None:
         kw = {'device': device, 'dtype': dtype}
@@ -1473,92 +1475,36 @@ class GraphTransformer(nn.Module):
         # return utils.PlaceHolder(X=X, E=E, y=y).mask(node_mask)
 
 
+class Embedder(nn.Module):
+    def __init__(self, vocab_size, d_model):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self._init_embeddings()
+
+    def _init_embeddings(self):
+        nn.init.kaiming_normal_(self.embed.weight, mode="fan_in")
+
+    def forward(self, x):
+        return self.embed(x)
+
+
 class FaceBboxTransformer(nn.Module):
     """
     n_layers : int -- number of layers
     dims : dict -- contains dimensions for each feature type
     """
-    def __init__(self, n_layers: int, input_dims: dict, hidden_mlp_dims: dict, hidden_dims: dict,
-                 output_dims: dict, act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU()):
+    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict, edge_classes: int,
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
         super().__init__()
         self.n_layers = n_layers
-        self.out_dim_X = output_dims['x']
+        self.use_cf = use_cf
 
-        self.mlp_in_X = nn.Sequential(nn.Linear(input_dims['x'], hidden_mlp_dims['x']), act_fn_in,
+        self.mlp_in_X = nn.Sequential(nn.Linear(6, hidden_mlp_dims['x']), act_fn_in,
                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
 
-        self.mlp_in_E = nn.Sequential(nn.Linear(input_dims['e'], hidden_mlp_dims['e']), act_fn_in,
-                                      nn.Linear(hidden_mlp_dims['e'], hidden_dims['de']), act_fn_in)
+        self.mlp_in_E = nn.Embedding(edge_classes, hidden_dims['de'])
 
-        self.mlp_in_y = nn.Sequential(nn.Linear(input_dims['y'], hidden_mlp_dims['y']), act_fn_in,
-                                      nn.Linear(hidden_mlp_dims['y'], hidden_dims['dy']), act_fn_in)
-
-        self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
-                                                                 de=hidden_dims['de'],
-                                                                 dy=hidden_dims['dy'],
-                                                                 n_head=hidden_dims['n_head'],
-                                                                 dim_ffX=hidden_dims['dim_ffX'],
-                                                                 dim_ffE=hidden_dims['dim_ffE'])
-                                        for i in range(n_layers)])
-
-        self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
-                                       nn.Linear(hidden_mlp_dims['x'], output_dims['x']))
-
-        # FiLM E to X
-        self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
-        self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
-
-        # FiLM y to X
-        self.y_x_mul = Linear(hidden_dims['dy'], hidden_dims['dx'])
-        self.y_x_add = Linear(hidden_dims['dy'], hidden_dims['dx'])
-
-    def forward(self, x, e, y, node_mask):
-
-        X_to_out = x[..., :self.out_dim_X]
-
-        new_E = self.mlp_in_E(e)
-        new_E = (new_E + new_E.transpose(1, 2)) / 2
-        x, e = xe_mask(x=self.mlp_in_X(x), e=new_E, node_mask=node_mask)
-        y = self.mlp_in_y(y)
-
-        e_add = self.e_add(e)
-        e_mul = self.e_mul(e)
-        y_x_add = self.y_x_add(y)
-        y_x_mul = self.y_x_mul(y)
-        for layer in self.tf_layers:
-            x = layer(x, e_add, e_mul, y_x_add, y_x_mul, node_mask)
-
-        x = self.mlp_out_X(x)
-        x = (x + X_to_out)
-
-        x, _ = xe_mask(x=x, node_mask=node_mask)
-
-        return x
-
-
-class VertGeomTransformer(nn.Module):
-    """
-    n_layers : int -- number of layers
-    dims : dict -- contains dimensions for each feature type
-    """
-    def __init__(self, max_edge: int, edge_classes: int, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
-                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU()):
-        super().__init__()
-        self.n_layers = n_layers
-
-        self.mlp_in_X = nn.Sequential(nn.Linear(3, hidden_mlp_dims['x']), act_fn_in,
-                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
-
-        self.mlp_in_E = nn.Embedding(2, hidden_dims['de'])
-
-        self.face_feat_extra = FaceFeatExtract(max_edge, edge_classes)
-
-        self.face_feat_embed = nn.Sequential(
-            nn.Linear(16, hidden_dims['dx']),
-            nn.LayerNorm(hidden_dims['dx']),
-            nn.SiLU(),
-            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
-        )
+        self.embed_dim = hidden_dims['dx']
 
         self.time_embed = nn.Sequential(
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
@@ -1570,8 +1516,96 @@ class VertGeomTransformer(nn.Module):
         self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
                                                                  de=hidden_dims['de'],
                                                                  n_head=hidden_dims['n_head'],
-                                                                 dim_ffX=hidden_dims['dim_ffX'],
-                                                                 dim_ffE=hidden_dims['dim_ffE'])
+                                                                 dim_ffX=hidden_dims['dim_ffX'])
+                                        for i in range(n_layers)])
+
+        self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
+                                       nn.Linear(hidden_mlp_dims['x'], 6))
+
+        # FiLM E to X
+        self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
+        self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
+
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.embed_dim)
+
+    def forward(self, x_t, e, mask, class_label, t):
+        """
+        Args:
+        - x_t: b*nf*6
+        - e: b*nf*nf
+        - mask: b*nf
+        - class_label: b*1
+        - t: b*1
+        """
+
+        X_to_out = x_t
+
+        new_E = self.mlp_in_E(e)
+        new_E = (new_E + new_E.transpose(1, 2)) / 2
+
+        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
+
+        tokens = self.mlp_in_X(x_t)+time_embeds
+        if self.use_cf:
+            if self.training:
+                # randomly set 10% to uncond label
+                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+                class_label[uncond_mask] = 0
+            c_embeds = self.class_embed(class_label)
+            tokens += c_embeds
+
+        x, e = xe_mask(x=tokens, e=new_E, node_mask=mask)
+
+        e_add = self.e_add(e)
+        e_mul = self.e_mul(e)
+        for layer in self.tf_layers:
+            x = layer(x, e_add, e_mul, mask)
+
+        x = self.mlp_out_X(x)
+        x = (x + X_to_out)
+
+        x, _ = xe_mask(x=x, node_mask=mask)
+
+        return x
+
+
+class VertGeomTransformer(nn.Module):
+    """
+    n_layers : int -- number of layers
+    dims : dict -- contains dimensions for each feature type
+    """
+    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+        super().__init__()
+        self.n_layers = n_layers
+        self.use_cf = use_cf
+
+        self.mlp_in_X = nn.Sequential(nn.Linear(3, hidden_mlp_dims['x']), act_fn_in,
+                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+
+        self.mlp_in_E = nn.Embedding(2, hidden_dims['de'])
+
+        self.embed_dim = hidden_dims['dx']
+
+        self.time_embed = nn.Sequential(
+            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+            nn.LayerNorm(hidden_dims['dx']),
+            nn.SiLU(),
+            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+        )
+
+        self.face_bbox_embed = nn.Sequential(
+            nn.Linear(6, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
+                                                                 de=hidden_dims['de'],
+                                                                 n_head=hidden_dims['n_head'],
+                                                                 dim_ffX=hidden_dims['dim_ffX'])
                                         for i in range(n_layers)])
 
         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
@@ -1581,15 +1615,18 @@ class VertGeomTransformer(nn.Module):
         self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
         self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
 
-    def forward(self, x_t, e, mask, edgeFace_adj, edgeVert_adj, edge_mask, t):
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.embed_dim)
+
+    def forward(self, x_t, e, mask, vertFace_bbox, vertFace_mask, class_label, t):
         """
         Args:
         - x_t: b*nv*3
         - e: b*nv*nv*2
         - mask: b*nv
-        - edgeFace_adj: b*ne*2
-        - edgeVert_adj: b*ne*2
-        - edge_mask: b*ne
+        - vertFace_bbox: b*nv*vf*6
+        - vertFace_mask: b*nv*vf
+        - class_label: b*1
         - t: b*1
         """
 
@@ -1598,15 +1635,21 @@ class VertGeomTransformer(nn.Module):
         new_E = self.mlp_in_E(e)
         new_E = (new_E + new_E.transpose(1, 2)) / 2
 
-        # face_feat = self.face_feat_embed(self.face_feat_extra(edgeFace_adj, edge_mask, edgeVert_adj))   # b*nv*embed_dim
-        #
-        # time_embeds = self.time_embed(sincos_embedding(t, face_feat.shape[-1]))  # b*1*embed_dim
-        #
-        # x, e = xe_mask(x=self.mlp_in_X(x_t)+face_feat+time_embeds, e=new_E, node_mask=mask)
+        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
 
-        time_embeds = self.time_embed(sincos_embedding(t, 512))  # b*1*embed_dim
+        vertFace_embeds = self.face_bbox_embed(vertFace_bbox)               # b*nv*vf*embed_dim
+        vertFace_embeds = vertFace_embeds.sum(-2) / (vertFace_mask.sum(-1, keepdim=True)+1e-8)     # b*nv*embed_dim
 
-        x, e = xe_mask(x=self.mlp_in_X(x_t)+time_embeds, e=new_E, node_mask=mask)
+        tokens = self.mlp_in_X(x_t)+time_embeds+vertFace_embeds
+        if self.use_cf:
+            if self.training:
+                # randomly set 10% to uncond label
+                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+                class_label[uncond_mask] = 0
+            c_embeds = self.class_embed(class_label)
+            tokens += c_embeds
+
+        x, e = xe_mask(x=tokens, e=new_E, node_mask=mask)
 
         e_add = self.e_add(e)
         e_mul = self.e_mul(e)
@@ -1724,14 +1767,14 @@ class EdgeGeomTransformer(nn.Module):
     Transformer-based latent diffusion model for edge feature
     """
 
-    def __init__(self, max_edge: int, edge_classes: int, n_layers: int, edge_geom_dim: int,):
+    def __init__(self, n_layers: int, edge_geom_dim: int, use_cf: bool):
         super(EdgeGeomTransformer, self).__init__()
         self.embed_dim = 768
+        self.use_cf = use_cf
 
         layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=12, norm_first=True,
                                            dim_feedforward=1024, dropout=0.1)
         self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
-        self.face_feat_extra = FaceFeatExtract(max_edge, edge_classes)
 
         self.edge_geom_embed = nn.Sequential(
             nn.Linear(edge_geom_dim, self.embed_dim),
@@ -1742,13 +1785,6 @@ class EdgeGeomTransformer(nn.Module):
 
         self.face_bbox_embed = nn.Sequential(
             nn.Linear(6, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
-
-        self.face_feat_embed = nn.Sequential(
-            nn.Linear(16, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
             nn.SiLU(),
             nn.Linear(self.embed_dim, self.embed_dim),
@@ -1775,19 +1811,29 @@ class EdgeGeomTransformer(nn.Module):
             nn.Linear(self.embed_dim, edge_geom_dim),
         )
 
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.embed_dim)
+
         return
 
-    def forward(self, x_t, edgeFace_bbox, edgeVert_geom, edge_mask, edgeFace_adj, t):   # b*ne*12, b*ne*2*6, b*ne*2*3, b*ne, b*ne*2, b*1
+    def forward(self, x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, t):   # b*ne*12, b*ne*2*6, b*ne*2*3, b*ne, b*ne*2, b*1, b*1
         """ forward pass """
 
         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
         face_bbox_embeds = self.face_bbox_embed(edgeFace_bbox)                # b*ne*2*embed_dim
-        face_feat = self.face_feat_embed(self.face_feat_extra(edgeFace_adj, edge_mask))    # b*ne*embed_dim
 
-        edge_vert_embeds = self.edge_vert_embed(edgeVert_geom).mean(-2)      # b*ne*embed_dim
-        edge_geom_embeds = self.edge_geom_embed(x_t)                         # b*ne*embed_dim
+        edge_vert_embeds = self.edge_vert_embed(edgeVert_geom).mean(-2)       # b*ne*embed_dim
+        edge_geom_embeds = self.edge_geom_embed(x_t)                          # b*ne*embed_dim
 
-        tokens = edge_geom_embeds + edge_vert_embeds + time_embeds + face_bbox_embeds.mean(-2) + face_feat  # b*ne*embed_dim
+        tokens = edge_geom_embeds + edge_vert_embeds + time_embeds + face_bbox_embeds.mean(-2)   # b*ne*embed_dim
+
+        if self.use_cf:
+            if self.training:
+                # randomly set 10% to uncond label
+                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+                class_label[uncond_mask] = 0
+            c_embeds = self.class_embed(class_label)
+            tokens += c_embeds
 
         output = self.net(
             src=tokens.permute(1, 0, 2),
@@ -1891,15 +1937,62 @@ class FaceGeomTransformer(nn.Module):
         return pred
 
 
+class GAT(torch.nn.Module):
+    def __init__(self, num_features, hidden_dim=16, num_heads=4, num_layers=4, output_dim=1):
+        super(GAT, self).__init__()
+        self.layers = torch.nn.ModuleList()
+
+        self.layers.append(GATConv(num_features, hidden_dim, heads=num_heads, concat=True, dropout=0.6))
+        for _ in range(num_layers - 2):
+            self.layers.append(GATConv(hidden_dim * num_heads, hidden_dim, heads=num_heads, concat=True, dropout=0.6))
+        self.layers.append(GATConv(hidden_dim * num_heads, output_dim, heads=1, concat=False, dropout=0.6))
+
+        self.batch_norms = torch.nn.ModuleList(
+            [torch.nn.BatchNorm1d(hidden_dim * num_heads) for _ in range(num_layers - 1)])
+
+        self.output_layer = torch.nn.Linear(output_dim, output_dim)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+
+        for i, conv in enumerate(self.layers[:-1]):
+            x = conv(x, edge_index)
+            x = torch.nn.functional.elu(x)
+            if i < len(self.batch_norms):
+                x = self.batch_norms[i](x)
+        x = self.layers[-1](x, edge_index)
+        return self.output_layer(x)
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3, activation_fn=nn.ReLU):
+        super(MLP, self).__init__()
+        layers = []
+        current_dim = input_dim
+        for _ in range(num_layers - 1):
+            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(activation_fn())
+            current_dim = hidden_dim
+        layers.append(nn.Linear(current_dim, output_dim))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
 class FaceEdgeModel(nn.Module):
-    def __init__(self, nf=50, d_model=128, n_head=4, dim_feedforward=1024, num_layers=4, num_categories=5):
+    def __init__(self, nf=32, d_model=128, n_head=4, dim_feedforward=1024, num_layers=4, num_categories=5, use_cf=False):
         super().__init__()
         self.nf = nf
         self.seq_len = int(nf * (nf - 1) / 2)
         self.d_model = d_model
+        self.use_cf = use_cf
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.num_categories = num_categories
+        self.GATmodel = GAT(num_features=1).to(device)
+        self.GAToptimizer = torch.optim.Adam(self.GATmodel.parameters(), lr=0.01)
 
-        self.embedding = nn.Embedding(num_categories+1, d_model)
+        self.embedding = nn.Embedding(num_categories + 1, d_model)
         self.positional_encoding = self.create_positional_encoding()
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_head, dim_feedforward=dim_feedforward)
@@ -1912,6 +2005,9 @@ class FaceEdgeModel(nn.Module):
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
         self.output_layer = nn.Linear(d_model, num_categories)
+
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.d_model)
 
     @staticmethod
     def generate_square_subsequent_mask(sz):
@@ -1927,15 +2023,108 @@ class FaceEdgeModel(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         return nn.Parameter(pe.unsqueeze(0), requires_grad=False)
 
-    def encode(self, src):
-        # src shape: [batch_size, seq_len]
-        src = self.embedding(src) + self.positional_encoding
+    def create_positional_encode_fef(self, src):
+        batch_size, seq_len = src.size()
+        n = int((1 + (1 + 8 * seq_len) ** 0.5) / 2)
+        device = src.device
+
+        upper_indices = torch.triu_indices(n, n, offset=1, device=device)
+        encoded_positions = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+        mask = src > 0
+        idx = mask.nonzero(as_tuple=False)
+
+        if idx.numel() > 0:
+            batch_indices = idx[:, 0]
+            seq_indices = idx[:, 1]
+            i_indices = upper_indices[0][seq_indices]
+            j_indices = upper_indices[1][seq_indices]
+
+            position_codes = i_indices * 10 + j_indices
+            encoded_positions[batch_indices, seq_indices] = position_codes
+        pe = torch.zeros(batch_size, seq_len, self.d_model, device=device)
+        position = encoded_positions.float().unsqueeze(-1)
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, device=device).float() * (-math.log(10000.0) / self.d_model)
+        )
+
+        pe[:, :, 0::2] = torch.sin(position * div_term)
+        pe[:, :, 1::2] = torch.cos(position * div_term)
+
+        return pe
+
+    def create_GAT_encode(self, src):
+        batch_size, seq_len = src.size()
+        n = int((1 + (1 + 8 * seq_len) ** 0.5) / 2)
+        device = src.device
+
+        upper_indices = torch.triu_indices(n, n, offset=1).to(device)
+
+        data_list = []
+
+        for i in range(batch_size):
+            src_i = src[i]
+            edge_mask = src_i > 0
+
+            expanded_edge_indices = upper_indices[:, edge_mask].repeat_interleave(src_i[edge_mask].to(torch.long),
+                                                                                  dim=1)
+
+            reverse_edge_indices = torch.stack([expanded_edge_indices[1], expanded_edge_indices[0]], dim=0)
+            full_edge_index = torch.cat([expanded_edge_indices, reverse_edge_indices], dim=1).to(torch.long)
+
+            x = torch.ones(n, 1).to(device)
+
+            data = Data(x=x, edge_index=full_edge_index)
+            data_list.append(data)
+
+        batch = Batch.from_data_list(data_list).to(device)
+        out = self.GATmodel(batch)
+
+        node_counts = torch.bincount(batch.batch)
+        node_features_list = torch.split(out, tuple(node_counts.cpu().numpy()))
+
+        node_features = torch.stack(node_features_list, dim=0)
+
+        return node_features.squeeze(-1)
+
+    def compute_GAT_encode(self, node_features):
+        batch_size, n = node_features.shape
+        device = node_features.device
+
+        upper_indices = torch.triu_indices(n, n, offset=1).to(device)
+        seq_len = upper_indices.size(1)
+
+        node_i_features = node_features[:, upper_indices[0]]
+        node_j_features = node_features[:, upper_indices[1]]
+
+        edge_features = torch.cat([node_i_features, node_j_features], dim=-1)
+
+        self.mlp = MLP(input_dim=seq_len * 2, hidden_dim=256, output_dim=seq_len * self.d_model).to(device)
+        edge_features = self.mlp(edge_features)
+        edge_features = edge_features.view(batch_size, seq_len, self.d_model)
+        layer_norm = torch.nn.LayerNorm(self.d_model).to(edge_features.device)
+        edge_features = layer_norm(edge_features)
+        return edge_features
+
+    def encode(self, src, class_label):
+        """
+        Args:
+            src: [batch_size, seq_len]
+            class_label: [batch_size, 1]
+        """
+
+        fef_pos_encoding = self.create_positional_encode_fef(src).to(src.device)
+        node_encode = self.create_GAT_encode(src)
+        GAT_encode = self.compute_GAT_encode(node_encode)
+        src = self.embedding(src) + self.positional_encoding + GAT_encode
+
+        if self.use_cf:
+            src += self.class_embed(class_label)
+
+        # src = self.embedding(src) + self.positional_encoding
         # src shape after embedding: [batch_size, seq_len, d_model]
-        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)
-        # memory shape: [batch_size, seq_len, d_model]
-        mu = self.fc_mu(memory.mean(dim=1))
-        logvar = self.fc_logvar(memory.mean(dim=1))
-        # mu and logvar shape: [batch_size, d_model]
+        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)    # [batch_size, seq_len, d_model]
+        mu = self.fc_mu(memory.mean(dim=1))                                                   # [batch_size, d_model]
+        logvar = self.fc_logvar(memory.mean(dim=1))                                           # [batch_size, d_model]
         return mu, logvar
 
     @staticmethod
@@ -1944,39 +2133,55 @@ class FaceEdgeModel(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z, tgt):
-        # z shape: [batch_size, d_model], tgt shape: [batch_size, current_seq_len]
-        batch_size, current_seq_len = tgt.shape
+    def decode(self, z, tgt, class_label):
+        """
+        Args:
+            z: [batch_size, d_model]
+            tgt: [batch_size, current_seq_len]
+            class_label: [batch_size, 1]
+        """
 
-        pos_encoding = self.positional_encoding[:, :current_seq_len, :]
+        batch_size, current_seq_len = tgt.shape  # [64,1]
 
-        tgt = self.embedding(tgt) + pos_encoding  # [batch_size, current_seq_len, d_model]
+        pos_encoding = self.positional_encoding[:, :current_seq_len, :].to(tgt.device)  # torch.Size([1, 1, 128])
+
+        tgt_embedded = self.embedding(tgt) + pos_encoding  # [batch_size, current_seq_len, d_model]
+
+        if self.use_cf:
+            tgt_embedded += self.class_embed(class_label)
 
         tgt_mask = self.generate_square_subsequent_mask(current_seq_len).to(tgt.device)
 
+        memory = z.unsqueeze(0).expand(current_seq_len, batch_size, self.d_model)
+
         output = self.transformer_decoder(
-            tgt.transpose(0, 1),
-            z.unsqueeze(0),
+            tgt_embedded.transpose(0, 1),
+            memory,
             tgt_mask=tgt_mask
-        ).transpose(0, 1)                        # [batch_size, current_seq_len, hidden_dim]
+        ).transpose(0, 1)  # [batch_size, current_seq_len, d_model]
 
-        return self.output_layer(output)         # [batch_size, current_seq_len, num_categories]
+        return self.output_layer(output)  # [batch_size, current_seq_len, num_categories]
 
-    def forward(self, src):
-        # src shape: [batch_size, seq_len]
+    def forward(self, src, class_label):
+        """
+        Args:
+            src: [batch_size, seq_len]
+            class_label: [batch_size, 1]
+        """
+
         src = torch.cat([torch.full((src.shape[0], 1), self.num_categories,
-                                    dtype=src.dtype, device=src.device), src], dim=1)       # b*(seq_len+1)
-        mu, logvar = self.encode(src[:, 1:])
+                                    dtype=src.dtype, device=src.device), src], dim=1)  # b*(seq_len+1)
+        mu, logvar = self.encode(src[:, 1:], class_label)
         z = self.reparameterize(mu, logvar)
-        return self.decode(z, src[:, :-1]), mu, logvar
+        return self.decode(z, src[:, :-1], class_label), mu, logvar
 
-    def sample(self, num_samples):
-        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)
-        start_token = torch.ones(num_samples, 1).long().to(z.device)*self.num_categories
+    def sample(self, num_samples, class_label=None):
+        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)  # [64,128]
+        start_token = torch.ones(num_samples, 1).long().to(z.device) * self.num_categories  # [64,1]
         generated = start_token
 
         for _ in range(self.seq_len):
-            output = self.decode(z, generated)
+            output = self.decode(z, generated, class_label)
             next_token = torch.distributions.Categorical(logits=output[:, -1, :]).sample()
             generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=1)
 
@@ -1990,6 +2195,107 @@ class FaceEdgeModel(nn.Module):
         matrix[:, idx[0], idx[1]] = sequence
         matrix = matrix + matrix.transpose(-2, -1) - torch.diag_embed(torch.diagonal(matrix, dim1=-2, dim2=-1))
         return matrix
+
+
+# class FaceEdgeModel(nn.Module):
+#     def __init__(self, nf=50, d_model=128, n_head=4, dim_feedforward=1024, num_layers=4, num_categories=5):
+#         super().__init__()
+#         self.nf = nf
+#         self.seq_len = int(nf * (nf - 1) / 2)
+#         self.d_model = d_model
+#         self.num_categories = num_categories
+#
+#         self.embedding = nn.Embedding(num_categories+1, d_model)
+#         self.positional_encoding = self.create_positional_encoding()
+#
+#         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_head, dim_feedforward=dim_feedforward)
+#         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+#
+#         self.fc_mu = nn.Linear(d_model, d_model)
+#         self.fc_logvar = nn.Linear(d_model, d_model)
+#
+#         decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=n_head, dim_feedforward=dim_feedforward)
+#         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+#
+#         self.output_layer = nn.Linear(d_model, num_categories)
+#
+#     @staticmethod
+#     def generate_square_subsequent_mask(sz):
+#         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+#         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+#         return mask
+#
+#     def create_positional_encoding(self):
+#         pe = torch.zeros(self.seq_len, self.d_model)
+#         position = torch.arange(0, self.seq_len, dtype=torch.float).unsqueeze(1)
+#         div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model))
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         return nn.Parameter(pe.unsqueeze(0), requires_grad=False)
+#
+#     def encode(self, src):
+#         # src shape: [batch_size, seq_len]
+#         src = self.embedding(src) + self.positional_encoding
+#         # src shape after embedding: [batch_size, seq_len, d_model]
+#         memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)
+#         # memory shape: [batch_size, seq_len, d_model]
+#         mu = self.fc_mu(memory.mean(dim=1))
+#         logvar = self.fc_logvar(memory.mean(dim=1))
+#         # mu and logvar shape: [batch_size, d_model]
+#         return mu, logvar
+#
+#     @staticmethod
+#     def reparameterize(mu, logvar):
+#         std = torch.exp(0.5 * logvar)
+#         eps = torch.randn_like(std)
+#         return mu + eps * std
+#
+#     def decode(self, z, tgt):
+#         # z shape: [batch_size, d_model], tgt shape: [batch_size, current_seq_len]
+#         batch_size, current_seq_len = tgt.shape
+#
+#         pos_encoding = self.positional_encoding[:, :current_seq_len, :]
+#
+#         tgt = self.embedding(tgt) + pos_encoding  # [batch_size, current_seq_len, d_model]
+#
+#         tgt_mask = self.generate_square_subsequent_mask(current_seq_len).to(tgt.device)
+#
+#         output = self.transformer_decoder(
+#             tgt.transpose(0, 1),
+#             z.unsqueeze(0),
+#             tgt_mask=tgt_mask
+#         ).transpose(0, 1)                        # [batch_size, current_seq_len, hidden_dim]
+#
+#         return self.output_layer(output)         # [batch_size, current_seq_len, num_categories]
+#
+#     def forward(self, src):
+#         # src shape: [batch_size, seq_len]
+#         src = torch.cat([torch.full((src.shape[0], 1), self.num_categories,
+#                                     dtype=src.dtype, device=src.device), src], dim=1)       # b*(seq_len+1)
+#         mu, logvar = self.encode(src[:, 1:])
+#         z = self.reparameterize(mu, logvar)
+#         return self.decode(z, src[:, :-1]), mu, logvar
+#
+#     def sample(self, num_samples):
+#         z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)
+#         start_token = torch.ones(num_samples, 1).long().to(z.device)*self.num_categories
+#         generated = start_token
+#
+#         for _ in range(self.seq_len):
+#             output = self.decode(z, generated)
+#             next_token = torch.distributions.Categorical(logits=output[:, -1, :]).sample()
+#             generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=1)
+#
+#         return self.sequence_to_matrix(generated[:, 1:])
+#
+#     def sequence_to_matrix(self, sequence):
+#         # sequence shape: [batch_size, seq_len]
+#         batch_size = sequence.shape[0]
+#         matrix = torch.zeros((batch_size, self.nf, self.nf), dtype=sequence.dtype).to(sequence.device)
+#         idx = torch.triu_indices(self.nf, self.nf, offset=1)
+#         matrix[:, idx[0], idx[1]] = sequence
+#         matrix = matrix + matrix.transpose(-2, -1) - torch.diag_embed(torch.diagonal(matrix, dim1=-2, dim2=-1))
+#         return matrix
 
 
 class GraphFeatModel(nn.Module):
@@ -2031,15 +2337,19 @@ class TopoEncoder(nn.Module):
             norm=nn.LayerNorm(d_model)
         )
 
-    def forward(self, edge_embed, edge_mask):
+    def forward(self, edge_embed, edge_mask, conds):
         """
         Args:
             edge_embed: A tensor of shape [batch_size, ne+2, m].
             edge_mask: A tensor of shape [batch_size, ne+2].
+            conds: Condition embeddings, [batch_size, ?, d_model]
         Returns:
             A tensor of shape [batch_size, ne+2, d_model]."""
 
         edge_embed = self.embed_layer(edge_embed)         # b*(ne+2)*d_model
+
+        if conds is not None:
+            edge_embed += conds                           # b*(ne+2)*d_model
 
         output = self.model(edge_embed.permute(1, 0, 2), src_key_padding_mask=~edge_mask)  # (ne+2)*b*d_model
 
@@ -2120,7 +2430,7 @@ class TopoDecoder(nn.Module):
 
 class TopoSeqModel(nn.Module):
     def __init__(self, input_face_features=8, emb_features=16, d_model=256,
-                 edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000):
+                 edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000, use_cf=False):
         super(TopoSeqModel, self).__init__()
 
         self.feat_extractor = GraphFeatModel(input_face_features=input_face_features,
@@ -2140,7 +2450,11 @@ class TopoSeqModel(nn.Module):
         self.decoder = TopoDecoder(max_seq_length=max_seq_length, d_model=d_model)
         self.project_to_pointers = nn.Linear(d_model, d_model)
 
-        self.class_embedding = nn.Embedding(edge_classes, emb_features)
+        self.fef_embedding = nn.Embedding(edge_classes, emb_features)
+
+        self.use_cf = use_cf
+        if self.use_cf:
+            self.class_embedding = Embedder(11, d_model)
 
         self.cache = {}
 
@@ -2181,7 +2495,7 @@ class TopoSeqModel(nn.Module):
             [torch.arange(i.item(), device=edgeFace_adj.device) for i in face_num_per]))
         edge_feat = face_feat[edge_index].mean(1)    # Ne*embed_features
 
-        edge_feat += self.class_embedding(torch.cat(
+        edge_feat += self.fef_embedding(torch.cat(
             [torch.arange(i.item()) for i in edge_index_num]).to(edge_index_num.device))
 
         # edge_feat += self.edge_idx_embedding(torch.cat(
@@ -2209,44 +2523,54 @@ class TopoSeqModel(nn.Module):
             start_idx = end_idx
         return edge_embed, edge_mask, edge_num_per
 
-    def encoding(self, edge_embed, edge_mask):
+    def encoding(self, edge_embed, edge_mask, class_label):
         batch_size = edge_mask.shape[0]
-        # b*(ne+2)*m
         edge_embed = torch.cat([
             self.face_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]),
             self.loop_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]), edge_embed],
-            dim=1)
-        edge_mask = torch.nn.functional.pad(edge_mask, [2, 0, 0, 0], value=1)      # b*(ne+2)
-        edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask)      # b*(ne+2)*d_model
+            dim=1)                                                                 # b*(ne+2)*m
+
+        if self.use_cf:
+            class_embeddings = self.class_embedding(class_label)                   # b*1*d_model
+        else:
+            class_embeddings = None
+
+        edge_mask = torch.nn.functional.pad(edge_mask, [2, 0, 0, 0], value=1)                           # b*(ne+2)
+        edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask, conds=class_embeddings)   # b*(ne+2)*d_model
         return edge_embed, edge_mask
 
-    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask):
+    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
             edge_mask: A tensor of shape [batch_size, ne].
             topo_seq: A tensor of shape [batch_size, ns].
             seq_mask: A tensor of shape [batch_size, ns].
+            class_label: A tensor of shape [batch_size, 1].
         Returns:
             A tensor with shape [batch_size, ns, ne+2]."""
 
-        """Extract graph features"""
+        # ====================================Extract graph features================================================
         edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
         assert torch.all(edge_mask.sum(-1) // 2 - 1 == topo_seq.max(-1)[0] // 2)
 
-        """Transformer Encoding"""
-        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask)
+        # =====================================Transformer Encoding=================================================
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label)
 
-        """Transformer Decoding"""
+        # =====================================Transformer Decoding=================================================
         batch_size = edge_mask.shape[0]
         sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)                  # b*(ne+2)*d_model
         seq_embed = torch.zeros((batch_size, topo_seq.shape[-1], edge_embed.shape[-1]),
                                 device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
         for i in range(batch_size):
             seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
-        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)    # b*ns*d_model
 
-        """Pointer Logits"""
+        # if self.use_cf:
+        #     seq_embed += self.class_embedding(class_label)
+
+        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)   # b*ns*d_model
+
+        # ========================================Pointer Logits===================================================
         pred_pointers = self.project_to_pointers(outs)                  # b*ns*d_model
         edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
         logits = torch.matmul(pred_pointers, edge_embed_transposed)
@@ -2256,17 +2580,19 @@ class TopoSeqModel(nn.Module):
 
         return logits
 
-    def save_cache(self, edgeFace_adj, edge_mask):
+    def save_cache(self, edgeFace_adj, edge_mask, class_label):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
-            edge_mask: A tensor of shape [batch_size, ne]."""
+            edge_mask: A tensor of shape [batch_size, ne].
+            class_label: A tensor of shape [batch_size, 1].
+        """
 
-        """Extract graph features"""
+        # ====================================Extract graph features================================================
         edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
 
-        """Transformer Encoding"""
-        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask)
+        # =====================================Transformer Encoding=================================================
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label)
         sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)  # b*(ne+2)*d_model
 
         self.cache['edge_embed'] = edge_embed
@@ -2277,14 +2603,16 @@ class TopoSeqModel(nn.Module):
     def clear_cache(self):
         self.cache.clear()
 
-    def sample(self, topo_seq, seq_mask, mask):
+    def sample(self, topo_seq, seq_mask, mask, class_label):
         """
         Args:
             topo_seq: A tensor of shape [batch_size, ns].
             seq_mask: A tensor of shape [batch_size, ns].
-            mask: """
+            mask:
+            class_label: [batch_size, 1]
+        """
 
-        """Transformer Decoding"""
+        # =====================================Transformer Decoding=================================================
         batch_size = topo_seq.shape[0]
         assert batch_size == 1
         edge_embed = self.cache['edge_embed']                                                 # b*(ne+2)*d_model
@@ -2295,9 +2623,13 @@ class TopoSeqModel(nn.Module):
                                 device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
         for i in range(batch_size):
             seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
+
+        if self.use_cf:
+            seq_embed += self.class_embedding(class_label)
+
         outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)    # b*ns*d_model
 
-        """Pointer Logits"""
+        # ======================================Pointer Logits=====================================================
         pred_pointers = self.project_to_pointers(outs)[:, [-1], :]      # b*1*d_model
         edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
         logits = torch.matmul(pred_pointers, edge_embed_transposed)

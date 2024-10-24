@@ -417,12 +417,39 @@ def fit_basic_surface(outer_points):
         outer_points: ne*32*3
     """
     # outer_points, inner_points = args
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     indices = np.linspace(0, outer_points.shape[1] - 1, 16, dtype=int)
     outer_points = np.array([outer_points[i][indices] for i in range(outer_points.shape[0])])
     outer_points = outer_points.reshape(-1, 3)
-    out = process_one_surface(outer_points,
-                              device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+    out = process_one_surface(outer_points, device, None)
+
     if out['err'] < 1:
+        return out
+    else:
+        assert False
+
+
+from concurrent.futures import ProcessPoolExecutor
+def fit_surface(face_id, edge_wcs, FaceEdgeAdj):
+    out = fit_basic_surface(outer_points=edge_wcs[FaceEdgeAdj[face_id]])
+    return out
+
+
+def construct_brep(edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
+    """
+    Fit parametric surfaces / curves and trim into B-rep
+    """
+    print('Building the B-rep...')
+
+    # Fit surface
+    recon_faces = []
+
+    with ProcessPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(fit_surface, range(len(FaceEdgeAdj)), [edge_wcs]*len(FaceEdgeAdj), [FaceEdgeAdj]*len(FaceEdgeAdj)))
+
+    for out in results:
         if out['type'] == 'plane':
             direction, distance = out['params']
             dire = gp_Dir(direction[0], direction[1], direction[2])
@@ -448,23 +475,6 @@ def fit_basic_surface(outer_points):
             ax3 = gp_Ax3(apex_point, axis_dir)
             approx_face = Geom_ConicalSurface(ax3, theta, 1)
 
-        return approx_face
-    else:
-        assert False
-
-
-def construct_brep(edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
-    """
-    Fit parametric surfaces / curves and trim into B-rep
-    """
-    print('Building the B-rep...')
-
-    # Fit surface
-    recon_faces = []
-
-    for face_id in range(len(FaceEdgeAdj)):
-
-        approx_face = fit_basic_surface(outer_points=edge_wcs[FaceEdgeAdj[face_id]])
         recon_faces.append(approx_face)
 
     recon_edges = []

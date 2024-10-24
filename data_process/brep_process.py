@@ -16,6 +16,7 @@ from OCC.Core.TColgp import TColgp_Array2OfPnt, TColgp_Array1OfPnt
 from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSpline
 from OCC.Core.GeomAbs import GeomAbs_C2
 from utils import load_data_with_prefix
+from functools import partial
 
 
 # To speed up processing, define maximum threshold
@@ -94,39 +95,7 @@ def get_bbox(point_cloud):
     return min_point, max_point
 
 
-def load_abc_step(root_dir, use_deepcad):
-    """
-    Recursively searches through a given parent directory and its subdirectories
-    to find the paths of all ABC STEP files.
-
-    Args:
-    - root_dir (str): Path to the root directory where the search begins.
-    - use_deepcad (bool): Process deepcad or not
-
-    Returns:
-    - step_dirs [str]: A list containing the paths to all STEP parent directory
-    """
-    # Load DeepCAD UID
-    if use_deepcad:
-        with open('train_val_test_split.json', 'r') as json_file:
-            deepcad_data = json.load(json_file)
-        deepcad_data = deepcad_data['train'] + deepcad_data['validation'] + deepcad_data['test']
-        deepcad_uid = set([uid.split('/')[1] for uid in deepcad_data])
-
-    # Create STEP file folder path (based on the default ABC STEP format)
-    dirs_nested = [[f'{root_dir}/abc_{str(i).zfill(4)}_step_v00'] * 10000 for i in range(100)]
-    dirs = [item for sublist in dirs_nested for item in sublist]
-    subdirs = [f'{str(i).zfill(8)}' for i in range(1000000)]
-
-    if use_deepcad:
-        step_dirs_ = [root + '/' + sub for root, sub in zip(dirs, subdirs) if sub in deepcad_uid]
-    else:
-        step_dirs_ = [root + '/' + sub for root, sub in zip(dirs, subdirs)]
-
-    return step_dirs_
-
-
-def load_furniture_step(root_dir):
+def load_steps(root_dir):
     """
     Recursively searches through a given parent directory and its subdirectories
     to find the paths of all Furniture STEP files.
@@ -391,7 +360,7 @@ def construct_vv_list(edgeVert_adj):
     return vv_list
 
 
-def process(step_folder, print_error=False):
+def process(step_folder, print_error=False, option='furniture'):
     """
     Helper function to load step files and process in parallel
 
@@ -401,16 +370,10 @@ def process(step_folder, print_error=False):
     - Complete status: Valid (1) / Non-valid (0).
     """
     try:
-        step_path = ""
+
         # Load cad data
-        if step_folder.endswith('.step'):
-            step_path = step_folder
-            process_furniture = True
-        else:
-            for _, _, files in os.walk(step_folder):
-                assert len(files) == 1
-                step_path = os.path.join(step_folder, files[0])
-            process_furniture = False
+        assert step_folder.endswith('.step')
+        step_path = step_folder
 
         # Check single solid
         cad_solid = load_step(step_path)
@@ -427,12 +390,14 @@ def process(step_folder, print_error=False):
             return 0  # number of faces or edges exceed pre-determined threshold
 
         # Save the parsed result 
-        if process_furniture:
+        if option == 'furniture':
             data_uid = step_path.split('/')[-2] + '_' + step_path.split('/')[-1]
             sub_folder = step_path.split('/')[-3]
+        elif option == 'deepcad':
+            data_uid = os.path.basename(step_path)
+            sub_folder = step_path.split('/')[-2]
         else:
-            data_uid = step_path.split('/')[-2]
-            sub_folder = data_uid[:4]
+            assert option == 'abc'
 
         if data_uid.endswith('.step'):
             data_uid = data_uid[:-5]  # furniture avoid .step
@@ -551,135 +516,12 @@ def bspline_fitting_local(path):
     return data, valid
 
 
-def bspline_fitting_global(path):
-
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
-
-    valid = 1
-
-    # Fitting surface
-    # try:
-    #     face_ncs = data['face_wcs']    # nf*32*32*3
-    #     face_ctrs = []
-    #     for points in face_ncs:
-    #         num_u_points, num_v_points = 32, 32
-    #         uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
-    #         for u_index in range(1, num_u_points + 1):
-    #             for v_index in range(1, num_v_points + 1):
-    #                 pt = points[u_index - 1, v_index - 1]
-    #                 point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
-    #                 uv_points_array.SetValue(u_index, v_index, point_3d)
-    #         approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 3, GeomAbs_C2, 5e-2).Surface()
-    #         num_u_poles = approx_face.NbUPoles()
-    #         num_v_poles = approx_face.NbVPoles()
-    #         control_points = np.zeros((num_u_poles * num_v_poles, 3))
-    #         assert approx_face.UDegree() == approx_face.VDegree() == 3
-    #         assert num_u_poles == num_v_poles == 4
-    #         assert (not approx_face.IsUPeriodic() and not approx_face.IsVPeriodic() and not approx_face.IsVRational()
-    #                 and not approx_face.IsVPeriodic())
-    #         poles = approx_face.Poles()
-    #         idx = 0
-    #         for u in range(1, num_u_poles + 1):
-    #             for v in range(1, num_v_poles + 1):
-    #                 point = poles.Value(u, v)
-    #                 control_points[idx, :] = [point.X(), point.Y(), point.Z()]
-    #                 idx += 1
-    #         face_ctrs.append(control_points)
-    #     face_ctrs = np.stack(face_ctrs)    # nf*16*3
-    #     data['face_ctrs'] = face_ctrs
-    # except Exception as e:
-    #     data['face_ctrs'] = None
-    #     valid = 0
-
-    try:
-        edge_ncs = data['edge_wcs']        # ne*32*3
-        edge_ctrs = []
-        for points in edge_ncs:
-            num_u_points = 32
-            u_points_array = TColgp_Array1OfPnt(1, num_u_points)
-            for u_index in range(1, num_u_points + 1):
-                pt = points[u_index - 1]
-                point_2d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
-                u_points_array.SetValue(u_index, point_2d)
-            try:
-                approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 5e-3).Curve()
-            except Exception as e:
-                print('high precision failed, trying mid precision...')
-                try:
-                    approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 8e-3).Curve()
-                except Exception as e:
-                    print('mid precision failed, trying low precision...')
-                    approx_edge = GeomAPI_PointsToBSpline(u_points_array, 3, 3, GeomAbs_C2, 5e-2).Curve()
-            num_poles = approx_edge.NbPoles()
-            assert approx_edge.Degree() == 3
-            assert num_poles == 4
-            assert not approx_edge.IsPeriodic() and not approx_edge.IsRational()
-            control_points = np.zeros((num_poles, 3))
-            poles = approx_edge.Poles()
-            for i in range(1, num_poles + 1):
-                point = poles.Value(i)
-                control_points[i - 1, :] = [point.X(), point.Y(), point.Z()]
-            edge_ctrs.append(control_points)
-        edge_ctrs = np.stack(edge_ctrs)  # nf*16*3
-        data['edge_ctrs'] = edge_ctrs
-    except Exception as e:
-        data['edge_ctrs'] = None
-        valid = 0
-
-    return data, valid
-
-
-def sort_face_ctrs(ctrs):
-    ctrs = ctrs.reshape(4, 4, 3)
-    corners = np.array([ctrs[0, 0], ctrs[0, 3], ctrs[3, 0], ctrs[3, 3]])
-
-    idx = np.lexsort((corners[:, 2], corners[:, 1], corners[:, 0]))[0]
-
-    def compare_points(p1, p2):
-        return np.lexsort((p1[2::-1],))[0] < np.lexsort((p2[2::-1],))[0]
-
-    def sort_and_reshape(arr):
-        return arr.reshape(-1, 3)
-
-    if idx == 0:
-        if compare_points(ctrs[0, 1], ctrs[1, 0]):
-            return sort_and_reshape(ctrs)
-        else:
-            return sort_and_reshape(np.swapaxes(ctrs, 0, 1))
-
-    elif idx == 1:
-        if compare_points(ctrs[0, 2], ctrs[1, 3]):
-            return sort_and_reshape(ctrs[:, ::-1, :])
-        else:
-            return sort_and_reshape(np.swapaxes(ctrs, 0, 1)[:, ::-1, :])
-
-    elif idx == 2:
-        if compare_points(ctrs[3, 1], ctrs[2, 0]):
-            return sort_and_reshape(ctrs[::-1, ...])
-        else:
-            return sort_and_reshape(np.swapaxes(ctrs, 0, 1)[::-1, ...])
-
-    else:
-        if compare_points(ctrs[3, 2], ctrs[2, 3]):
-            return sort_and_reshape(ctrs[::-1, ::-1, ...])
-        else:
-            return sort_and_reshape(np.swapaxes(ctrs, 0, 1)[::-1, ::-1, :])
-
-
-def sort_edge_ctrs(ctrs):
-    assert ctrs.shape == (4, 3), "Input shape must be (4, 3)"
-
-    if np.lexsort((ctrs[0, 2::-1],))[0] <= np.lexsort((ctrs[3, 2::-1],))[0]:
-        return ctrs
-    else:
-        return ctrs[::-1]
-
-
 def main():
 
-    files = load_data_with_prefix('data_process/GeomDatasets/furniture_parsed', '.pkl')
+    files = load_data_with_prefix('data_process/GeomDatasets/deepcad_parsed', '.pkl')
     print(len(files))
+
+    files = ['/home/jing/PythonProjects/BrepGDM/data_process/GeomDatasets/deepcad_parsed/0071/00716434_c8000d0dab984f68f0a79d91_step_032.pkl']
 
     total_valid = 0
     for file in tqdm(files):
@@ -692,31 +534,28 @@ def main():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, help="Data folder path", default='/home/jing/Datasets/furniture_dataset')
-    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='furniture',
+    parser.add_argument("--input", type=str, help="Data folder path", default='/home/jing/Datasets/DeepCAD')
+    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
                         help="Choose between dataset option [abc/deepcad/furniture] (default: abc)")
     parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
     args = parser.parse_args()
 
     if args.option == 'deepcad':
-        OUTPUT = 'deepcad_parsed'
+        OUTPUT = 'GeomDatasets/deepcad_parsed'
     elif args.option == 'abc':
-        OUTPUT = 'abc_parsed'
+        OUTPUT = 'GeomDatasets/abc_parsed'
     else:
-        OUTPUT = 'furniture_parsed'
+        OUTPUT = 'GeomDatasets/furniture_parsed'
 
-    # # Load all STEP files
-    # if args.option == 'furniture':
-    #     step_dirs = load_furniture_step(args.input)
-    # else:
-    #     step_dirs = load_abc_step(args.input, args.option == 'deepcad')
-    #     step_dirs = step_dirs[args.interval * 10000: (args.interval + 1) * 10000]
-    #
-    # # Process B-reps in parallel
-    # # for i in tqdm(step_dirs):
-    # #     process(i)
+    step_dirs = load_steps(args.input)
+
+    process_with_option = partial(process, option=args.option)
+
+    # Process B-reps in parallel
+    # for i in tqdm(step_dirs):
+    #     process_with_option(i)
     # valid = 0
-    # convert_iter = Pool(os.cpu_count()).imap(process, step_dirs)
+    # convert_iter = Pool(os.cpu_count()).imap(process_with_option, step_dirs)
     # for status in tqdm(convert_iter, total=len(step_dirs)):
     #     valid += status
     # print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))

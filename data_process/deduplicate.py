@@ -12,9 +12,9 @@ import numpy as np
 def create_parser():
     """Create the base argument parser"""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, default='data_process/GeomDatasets/furniture_parsed', help="Data folder path or CAD .pkl file")
+    parser.add_argument("--data", type=str, default='data_process/GeomDatasets/deepcad_parsed', help="Data folder path or CAD .pkl file")
     parser.add_argument("--bit", type=int, default=6, help='Deduplicate precision')
-    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='furniture',
+    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
                         help="Choose between dataset options: [abc/deepcad/furniture]")
     return parser
 
@@ -31,65 +31,7 @@ def args_deduplicate_facEdge(known_args):
     return parser.parse_args(known_args)
 
 
-def load_abc_pkl(root_dir, use_deepcad):
-    """
-    Recursively searches through a given parent directory and its subdirectories
-    to find the paths of all ABC .pkl files.
-
-    Args:
-    - root_dir (str): Path to the root directory where the search begins.
-    - use_deepcad (bool): Process deepcad or not
-
-    Returns:
-    - train [str]: A list containing the paths to all .pkl train data
-    - val [str]: A list containing the paths to all .pkl validation data
-    - test [str]: A list containing the paths to all .pkl test data
-    """
-    # Load DeepCAD UID
-    if use_deepcad:
-        with open('train_val_test_split.json', 'r') as json_file:
-            deepcad_data = json.load(json_file)
-        train_uid = set([uid.split('/')[1] for uid in deepcad_data['train']])
-        val_uid = set([uid.split('/')[1] for uid in deepcad_data['validation']])
-        test_uid = set([uid.split('/')[1] for uid in deepcad_data['test']])
-
-    # Load ABC UID
-    else:
-        full_uids = []
-        dirs = [f'{root_dir}/{str(i).zfill(4)}' for i in range(100)]
-        for folder in dirs:
-            files = os.listdir(folder)
-            full_uids += files
-        # 90-5-5 random split, same as deepcad
-        random.shuffle(full_uids)  # randomly shuffle data
-        train_uid = full_uids[0:int(len(full_uids)*0.9)]
-        val_uid = full_uids[int(len(full_uids)*0.9):int(len(full_uids)*0.95)]
-        test_uid = full_uids[int(len(full_uids)*0.95):]
-        train_uid = set([uid.split('.')[0] for uid in train_uid])
-        val_uid = set([uid.split('.')[0] for uid in val_uid])
-        test_uid = set([uid.split('.')[0] for uid in test_uid])
-
-    train = []
-    val = []
-    test = []
-    dirs = [f'{root_dir}/{str(i).zfill(4)}' for i in range(100)]
-    for folder in dirs:
-        files = os.listdir(folder)
-        for file in files:
-            key_id = file.split('.')[0]
-            if key_id in train_uid:
-                train.append(file)
-            elif key_id in val_uid:
-                val.append(file)
-            elif key_id in test_uid:
-                test.append(file)
-            else:
-                print('unknown uid...')
-                assert False
-    return train, val, test
-
-
-def load_furniture_pkl(root_dir):
+def load_pkl(root_dir):
     """
     Recursively searches through a given parent directory and its subdirectories
     to find the paths of all furniture .pkl files.
@@ -165,10 +107,7 @@ def main():
         print("CAD args:", cad_args)
 
         # Load all STEP folders
-        if cad_args.option == 'furniture':
-            train, val_path, test_path = load_furniture_pkl(cad_args.data)
-        else:
-            train, val_path, test_path = load_abc_pkl(cad_args.data, cad_args.option == 'deepcad')
+        train, val_path, test_path = load_pkl(cad_args.data)
 
         # Remove duplicate for the training set
         train_path = []
@@ -177,10 +116,7 @@ def main():
 
         for path_idx, uid in tqdm(enumerate(train)):
             total += 1
-            if cad_args.option == 'furniture':
-                path = os.path.join(cad_args.data, uid)
-            else:
-                path = os.path.join(cad_args.data, str(math.floor(int(uid.split('.')[0]) / 10000)).zfill(4), uid)
+            path = os.path.join(cad_args.data, uid)
             data = load_pkl_data(path)
 
             # Hash the face sampled points
@@ -201,7 +137,7 @@ def main():
             'val': val_path,
             'test': test_path,
         }
-        save_unique_data(f'{cad_args.option}_data_split_{cad_args.bit}bit.pkl', data_path)
+        save_unique_data(f'data_process/{cad_args.option}_data_split_{cad_args.bit}bit.pkl', data_path)
 
     elif args.name == 'facEdge':
         facEdge_args = args_deduplicate_facEdge(unknown)

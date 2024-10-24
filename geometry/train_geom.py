@@ -21,13 +21,13 @@ def get_args_geom():
     parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
                         help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='vertGeom',)
+        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='faceBbox')
     parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
     parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
                         help="Graph feature extraction type (default: all)")
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
-    parser.add_argument('--train_epochs', type=int, default=1000, help='number of epochs to train for')
+    parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
     parser.add_argument('--timesteps', type=int, default=500, help='diffusion timesteps')
@@ -35,15 +35,16 @@ def get_args_geom():
     parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
     parser.add_argument('--max_num_edge', type=int, default=100, help='maximum number of edges per brep')
     parser.add_argument('--max_vert', type=int, default=100, help='maximum number of vertices per brep')
+    parser.add_argument('--max_vertFace', type=int, default=5, help='maximum number of faces each vertex')
     parser.add_argument('--threshold', type=float, default=0.05, help='minimum threshold between two faces')
     parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
     parser.add_argument('--z_scaled', type=float, default=1, help='scaled the latent z')
     parser.add_argument("--gpu", type=int, nargs='+', default=[0, 1],
                         help="GPU IDs to use for training (default: [0, 1])")
     parser.add_argument("--data_aug",  action='store_true', help='Use data augmentation')
-    parser.add_argument("--cf",  action='store_false', help='Use data augmentation')
+    parser.add_argument("--cf",  action='store_false', help='Use class condition')
     # Save dirs and reload
-    parser.add_argument('--env', type=str, default="furniture_geom_vertGeom", help='environment')
+    parser.add_argument('--env', type=str, default="furniture_geom_faceBbox", help='environment')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     # saved folder
@@ -59,15 +60,15 @@ def compute_dataset_info(args):
     integer_counts = defaultdict(int)
     node_distribution = torch.zeros(args.max_face+1)
     max_num_edge = 0
-    max_vertex = 0
-    max_vertexFace = 0
+    max_vert = 0
+    max_vertFace = 0
     for path in datas:
         with open(os.path.join(args.data, path), 'rb') as file:
             data = pickle.load(file)
             fef_adj = data['fef_adj']
             max_num_edge = max(max_num_edge, len(data['edgeFace_adj']))
-            max_vertex = max(max_vertex, len(data['vert_wcs']))
-            max_vertexFace = max(max_vertexFace, max([len(i) for i in data['vertFace_adj']]))
+            max_vert = max(max_vert, len(data['vert_wcs']))
+            max_vertFace = max(max_vertFace, max([len(i) for i in data['vertFace_adj']]))
             assert np.array_equal(fef_adj, fef_adj.T) and np.all(np.diag(fef_adj) == 0)
 
             unique, counts = np.unique(fef_adj, return_counts=True)
@@ -82,7 +83,8 @@ def compute_dataset_info(args):
                 node_distribution[fef_adj.shape[0]] += 1
 
     args.max_num_edge = max_num_edge
-    args.max_vert = max_vertex
+    args.max_vert = max_vert
+    args.max_vertFace = max_vertFace
 
     assert min(integer_counts.keys()) == 0
     if args.edge_classes == -1:
@@ -126,7 +128,7 @@ def main():
         os.makedirs(args.save_dir)
 
     # Set PyTorch to use only the specified GPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, args.gpu))
+    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, args.gpu))
 
     # Initialize dataset loader and trainer
     if args.option == 'faceBbox':

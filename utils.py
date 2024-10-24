@@ -15,6 +15,10 @@ def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
     if data['edge_ctrs'] is None:
         return False
 
+    if 'pc' in data:
+        if data['pc'] is None:
+            return False
+
     # Check Topology
     edgeVert_adj = data['edgeVert_adj']
     for face_edges in faceEdge_adj:
@@ -162,132 +166,6 @@ def pad_zero(x, max_len, dim=0):
         raise TypeError("Input x must be a numpy array or a torch tensor")
 
     return total, mask
-
-
-def compute_vertEdge_adj(edgeVert_adj):
-    max_vertex_id = np.max(edgeVert_adj)
-
-    vertEdge_adj = [[] for _ in range(max_vertex_id + 1)]
-
-    for edge_id, (v1, v2) in enumerate(edgeVert_adj):
-        vertEdge_adj[v1].append(edge_id)
-        vertEdge_adj[v2].append(edge_id)
-
-    return vertEdge_adj
-
-
-def construct_edgeFace_adj(edge_face_topo, node_mask=None):   # b*n*n, b*n
-    edgeFace_adj = []
-
-    # Get the batch size and dimensions
-    b, n, _ = edge_face_topo.shape
-
-    # Create a mask to select the upper triangle without the diagonal
-    triu_mask = torch.triu(torch.ones((n, n), device=node_mask.device), diagonal=1).bool()   # n*n
-
-    # Loop through each batch
-    for m in range(b):
-        # Get the upper triangle elements (excluding the diagonal)
-        edge_counts = edge_face_topo[m][triu_mask]
-
-        # Get the indices of the upper triangle
-        indices = torch.nonzero(triu_mask, as_tuple=False)
-
-        # Apply node_mask if provided
-        if node_mask is not None:
-            valid_nodes = node_mask[m]
-            valid_indices = valid_nodes[indices[edge_counts>0]].all(dim=1)
-            assert valid_indices.all(), f"Invalid edges in batch {m}"
-
-        # Repeat indices based on the edge counts
-        repeated_indices = indices.repeat_interleave(edge_counts, dim=0)
-
-        # Append the edges to the list
-        edgeFace_adj.append(repeated_indices)
-
-    return edgeFace_adj
-
-
-def construct_vv_list(edgeVert_adj):
-
-    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj)]
-
-    return vv_list
-
-
-def reconstruct_vv_adj(n_vertices, vv_list):     # array[[v1, v2, edge_idx], ...]
-    indices = vv_list[:, :2].astype(int)  # ne*2
-    vv_adj = np.zeros((n_vertices, n_vertices), dtype=int)  # nv*nv
-    vv_adj[indices[:, 0], indices[:, 1]] = 1
-    vv_adj[indices[:, 1], indices[:, 0]] = 1  # nv*nv
-
-    return vv_adj
-
-
-def construct_vertFace(nv, edgeVert_adj, edgeFace_adj):
-    vertex_edge_dict = {i: [] for i in range(nv)}
-    for edge_id, (v1, v2) in enumerate(edgeVert_adj):
-        vertex_edge_dict[v1].append(edge_id)
-        vertex_edge_dict[v2].append(edge_id)
-
-    vertex_edge = [vertex_edge_dict[i] for i in range(nv)]  # list[[edge_1, edge_2,...],...]
-    # list[[face_1, face_2,...], ...]
-    vertexFace = [np.unique(edgeFace_adj[i].reshape(-1)).tolist() for i in vertex_edge]
-    return vertexFace
-
-
-def construct_faceVert(vertexFace):
-
-    # Find the total number of faces:
-    num_faces = max(max(faces) for faces in vertexFace) + 1
-
-    # Initialize the faceVertex list with empty lists
-    faceVertex = [[] for _ in range(num_faces)]
-
-    # Populate faceVertex
-    for vertex_id, faces in enumerate(vertexFace):
-        for face_id in faces:
-            faceVertex[face_id].append(vertex_id)
-
-    return faceVertex
-
-
-def construct_feTopo(edgeFace_adj):    # ne*2
-    num_faces = edgeFace_adj.max()+1
-    fef_adj = torch.zeros((num_faces, num_faces), device=edgeFace_adj.device, dtype=edgeFace_adj.dtype)   # nf*nf
-    for face_idx in edgeFace_adj:
-        fef_adj[face_idx[0], face_idx[1]] += 1
-        fef_adj[face_idx[1], face_idx[0]] += 1
-
-    assert torch.equal(fef_adj, fef_adj.transpose(0, 1))
-
-    return fef_adj    # nf*nf
-
-
-def construct_fvf_geom(faceEdge_adj, edgeVert_adj, vert_geom, fvf_mask, m, nf=None):   # [[e1, e2, ...], ...], ne*2, nv*3, nf*nf
-    if nf is None:
-        nf = len(faceEdge_adj)
-
-    # Initialize fvf_geom based on the type of fvf_mask
-    if isinstance(fvf_mask, np.ndarray):
-        fvf_geom = np.zeros((nf, nf, m, 2, 3), dtype=np.float32)
-        nonzero_indices = np.nonzero(fvf_mask)
-    elif isinstance(fvf_mask, torch.Tensor):
-        fvf_geom = torch.zeros((nf, nf, m, 2, 3), dtype=torch.float32, device=fvf_mask.device)
-        nonzero_indices = torch.nonzero(fvf_mask, as_tuple=True)
-    else:
-        raise TypeError("fvf_mask must be either a numpy array or a torch tensor")
-
-    rows, cols = nonzero_indices
-    upper_triangle_indices = [(i, j) for i, j in zip(rows, cols) if i < j]
-    for i, j in upper_triangle_indices:
-        common_edges = list(set(faceEdge_adj[i]).intersection(set(faceEdge_adj[j])))
-        assert len(common_edges) > 0
-        temp = vert_geom[edgeVert_adj[common_edges]]
-        fvf_geom[i, j, :len(common_edges), ...] = temp
-        fvf_geom[j, i, :len(common_edges), ...] = temp
-
-    return fvf_geom
 
 
 def generate_random_string(length):

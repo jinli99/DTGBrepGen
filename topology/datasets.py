@@ -4,8 +4,13 @@ import copy
 import torch
 import numpy as np
 from tqdm import tqdm
-from utils import check_step_ok, pad_zero
+from utils import check_step_ok, pad_zero, load_data_with_prefix
 from itertools import chain
+
+
+# furniture class labels
+text2int = {'bathtub': 0, 'bed': 1, 'bench': 2, 'bookshelf': 3, 'cabinet': 4, 'chair': 5, 'couch': 6, 'lamp': 7,
+            'sofa': 8, 'table': 9}
 
 
 def opposite_idx(idx):
@@ -133,38 +138,73 @@ def compute_topoSeq(faceEdge_adj, edgeVert_adj):
     return topo_seq
 
 
-def create_topo_datasets(data_type='train'):
+def create_topo_datasets(data_type='train', option='deepcad'):
 
     def create(path):
 
-        if not check_step_ok(path):
-            return 0
+        if option == 'furniture':
+            with open(os.path.join('data_process/GeomDatasets/furniture_parsed', path), 'rb') as f:
+                datas = pickle.load(f)
 
-        with open(os.path.join('../data_process/GeomDatasets/furniture_parsed', path), 'rb') as f:
-            datas = pickle.load(f)
+                if not check_step_ok(datas, max_face=32):
+                    return 0
+        elif option == 'deepcad':
+            with open(os.path.join('data_process/GeomDatasets/deepcad_parsed', path), 'rb') as f:
+                datas = pickle.load(f)
 
-        data = {'name': path.replace('/', '_').replace('.pkl', '')}
+                if not check_step_ok(datas, max_face=30, max_edge=20):
+                    return 0
+        else:
+            assert option == 'abc'
 
-        faceEdge_adj, edgeFace_adj, edgeVert_adj, fef_adj = assign_idx(datas['faceEdge_adj'],
-                                                                       datas['edgeFace_adj'],
-                                                                       datas['edgeVert_adj'],
-                                                                       datas['fef_adj'])
+        if option == 'furniture':
+            data = {'name': path.replace('/', '_').replace('.pkl', '')}
 
-        topo_seq = compute_topoSeq(faceEdge_adj, edgeVert_adj)
+            faceEdge_adj, edgeFace_adj, edgeVert_adj, fef_adj = assign_idx(datas['faceEdge_adj'],
+                                                                           datas['edgeFace_adj'],
+                                                                           datas['edgeVert_adj'],
+                                                                           datas['fef_adj'])
 
-        data['topo_seq'] = topo_seq
-        data['faceEdge_adj'] = faceEdge_adj
-        data['edgeFace_adj'] = edgeFace_adj
-        data['edgeVert_adj'] = edgeVert_adj
-        data['fef_adj'] = fef_adj
+            topo_seq = compute_topoSeq(faceEdge_adj, edgeVert_adj)
 
-        os.makedirs(os.path.join('../data_process/topoDatasets/furniture', data_type), exist_ok=True)
-        with open(os.path.join('../data_process/topoDatasets/furniture', data_type, data['name']+'.pkl'), 'wb') as f:
-            pickle.dump(data, f)
+            data['topo_seq'] = topo_seq
+            data['faceEdge_adj'] = faceEdge_adj
+            data['edgeFace_adj'] = edgeFace_adj
+            data['edgeVert_adj'] = edgeVert_adj
+            data['fef_adj'] = fef_adj
+
+            os.makedirs(os.path.join('data_process/TopoDatasets/furniture', data_type), exist_ok=True)
+            with open(os.path.join('data_process/TopoDatasets/furniture', data_type, data['name'] + '.pkl'), 'wb') as f:
+                pickle.dump(data, f)
+        elif option == 'deepcad':
+            data = {'name': path.split('/')[-1].replace('.pkl', '')}
+
+            faceEdge_adj, edgeFace_adj, edgeVert_adj, fef_adj = assign_idx(datas['faceEdge_adj'],
+                                                                           datas['edgeFace_adj'],
+                                                                           datas['edgeVert_adj'],
+                                                                           datas['fef_adj'])
+
+            topo_seq = compute_topoSeq(faceEdge_adj, edgeVert_adj)
+
+            data['topo_seq'] = topo_seq
+            data['faceEdge_adj'] = faceEdge_adj
+            data['edgeFace_adj'] = edgeFace_adj
+            data['edgeVert_adj'] = edgeVert_adj
+            data['fef_adj'] = fef_adj
+            data['pc'] = datas['pc']
+
+            os.makedirs(os.path.join('data_process/TopoDatasets/deepcad', data_type, path.split('/')[-2]), exist_ok=True)
+            with open(os.path.join('data_process/TopoDatasets/deepcad', data_type,  path.split('/')[-2], data['name']+'.pkl'), 'wb') as f:
+                pickle.dump(data, f)
+
         return 1
 
-    with open('../data_process/furniture_data_split_6bit.pkl', 'rb') as tf:
-        files = pickle.load(tf)[data_type]
+    with open('data_process/deepcad_data_split_6bit.pkl', 'rb') as tf:
+        if data_type == 'train':
+            files = pickle.load(tf)['train']
+        else:
+            files = pickle.load(tf)
+            files = files['test'] + files['val']
 
     valid = 0
     for file in tqdm(files):
@@ -175,10 +215,10 @@ def create_topo_datasets(data_type='train'):
 
 class FaceEdgeDataset(torch.utils.data.Dataset):
     def __init__(self, path, args):
-        data = os.listdir(path)
-        self.data = [os.path.join(path, i) for i in data]
+        self.data = load_data_with_prefix(path, '.pkl')
         self.max_face = args.max_face
         self.max_edge = args.edge_classes - 1
+        self.use_cf = args.cf
 
     def __len__(self):
         return len(self.data)
@@ -193,13 +233,17 @@ class FaceEdgeDataset(torch.utils.data.Dataset):
         fef_adj = fef_adj[sorted_ids][:, sorted_ids]
         assert np.all(fef_adj == fef_adj.transpose(0, 1))
         fef_adj, mask = pad_zero(fef_adj, max_len=self.max_face, dim=1)      # max_face*max_face, max_face
-        return torch.from_numpy(fef_adj), torch.from_numpy(mask)
+
+        if self.use_cf:
+            data_class = text2int[data['name'].split('_')[0]] + 1
+            return torch.from_numpy(fef_adj), torch.from_numpy(mask), torch.LongTensor([data_class])
+        else:
+            return torch.from_numpy(fef_adj), torch.from_numpy(mask)
 
 
 class TopoSeqDataset(torch.utils.data.Dataset):
-    def __init__(self, path, data_aug=False):
-        data = os.listdir(path)
-        self.data = [os.path.join(path, i) for i in data]
+    def __init__(self, path, args):
+        self.data = load_data_with_prefix(path, '.pkl')
         max_num_edge = 0
         max_seq_length = 0
         for file in self.data:
@@ -210,7 +254,8 @@ class TopoSeqDataset(torch.utils.data.Dataset):
                 max_num_edge = max(max_num_edge, data['edgeFace_adj'].shape[0])
         self.max_seq_length = max_seq_length
         self.max_num_edge = max_num_edge
-        self.data_aug = data_aug
+        self.data_aug = args.data_aug
+        self.use_cf = args.cf
 
     def swap_in_sublist(self, sublist, swap_prob=0.1):
         arr = np.array(sublist)
@@ -224,23 +269,6 @@ class TopoSeqDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def shuffle_idx(faceEdge_adj, edgeFace_adj, edgeVert_adj):
-
-        # total_edges = edgeFace_adj.shape[0]
-        #
-        # new_edge_ids = np.random.permutation(total_edges)
-        #
-        # faceEdge_adj = [new_edge_ids[face_edges].tolist() for face_edges in faceEdge_adj]
-        #
-        # inverse_idx_map = [-1] * len(new_edge_ids)
-        # for i, idx in enumerate(new_edge_ids):
-        #     inverse_idx_map[idx] = i
-        #
-        # edgeFace_adj = edgeFace_adj[inverse_idx_map]
-        # edgeVert_adj = edgeVert_adj[inverse_idx_map]
-        #
-        # topo_seq = compute_topoSeq(faceEdge_adj, edgeVert_adj)
-        #
-        # return edgeFace_adj, topo_seq
 
         sorted_face_ids = np.random.permutation(len(faceEdge_adj))
         new_face_idx = np.zeros_like(sorted_face_ids)
@@ -293,13 +321,23 @@ class TopoSeqDataset(torch.utils.data.Dataset):
 
         topo_seq = np.expand_dims(np.array(list(chain.from_iterable(sublist + [-2] for sublist in topo_seq))), axis=-1)
         topo_seq, seq_mask = pad_zero(topo_seq, max_len=self.max_seq_length)        # max_seq_length*1, max_seq_length
-        return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
-                torch.from_numpy(edge_mask),               # max_num_edge
-                torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
-                torch.from_numpy(seq_mask).squeeze(-1)     # max_seq_length
-                )
+
+        if self.use_cf:
+            data_class = text2int[data['name'].split('_')[0]] + 1
+            return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
+                    torch.from_numpy(edge_mask),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
+                    torch.from_numpy(seq_mask).squeeze(-1),    # max_seq_length
+                    torch.LongTensor([data_class])             # 1
+                    )
+        else:
+            return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
+                    torch.from_numpy(edge_mask),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
+                    torch.from_numpy(seq_mask).squeeze(-1)     # max_seq_length
+                    )
 
 
 if __name__ == '__main__':
-    create_topo_datasets(data_type='train')
-    create_topo_datasets(data_type='test')
+    # create_topo_datasets(data_type='train', option='deepcad')
+    create_topo_datasets(data_type='test', option='deepcad')

@@ -40,7 +40,8 @@ class FaceEdgeTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.save_dir = args.save_dir
         self.edge_classes = args.edge_classes
-        model = FaceEdgeModel(nf=args.max_face, num_categories=args.edge_classes)
+        self.use_cf = args.cf
+        model = FaceEdgeModel(nf=args.max_face, num_categories=args.edge_classes, use_cf=self.use_cf)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
@@ -79,7 +80,11 @@ class FaceEdgeTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                fef_adj, _ = data                                                  # b*nf*nf, b*nf
+                if self.use_cf:
+                    fef_adj, _, class_label = data                                 # b*nf*nf, b*nf, b*1
+                else:
+                    fef_adj, _ = data                                              # b*nf*nf, b*nf
+                    class_label = None
                 upper_indices = torch.triu_indices(fef_adj.shape[1], fef_adj.shape[1], offset=1)
                 fef_adj_upper = fef_adj[:, upper_indices[0], upper_indices[1]]     # b*seq_len
 
@@ -87,7 +92,7 @@ class FaceEdgeTrainer:
                 self.optimizer.zero_grad()
 
                 # b*seq_len*m, b*latent_dim, b*latent_dim
-                adj, mu, logvar = self.model(fef_adj_upper)
+                adj, mu, logvar = self.model(fef_adj_upper, class_label)
                 # Loss
                 assert not torch.isnan(adj).any()
                 kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
@@ -125,12 +130,16 @@ class FaceEdgeTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                fef_adj, _ = data                                                  # b*nf*nf, b*nf
+                if self.use_cf:
+                    fef_adj, _, class_label = data                                 # b*nf*nf, b*nf, b*1
+                else:
+                    fef_adj, _ = data                                              # b*nf*nf, b*nf
+                    class_label = None
                 upper_indices = torch.triu_indices(fef_adj.shape[1], fef_adj.shape[1], offset=1)
                 fef_adj_upper = fef_adj[:, upper_indices[0], upper_indices[1]]     # b*seq_len
 
                 # b*seq_len*m, b*latent_dim, b*latent_dim
-                adj, mu, logvar = self.model(fef_adj_upper)
+                adj, mu, logvar = self.model(fef_adj_upper, class_label)
                 # Loss
                 assert not torch.isnan(adj).any()
                 kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
@@ -161,7 +170,11 @@ class TopoSeqTrainer:
         self.epoch = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.save_dir = args.save_dir
-        model = TopoSeqModel(max_num_edge=train_dataset.max_num_edge, max_seq_length=train_dataset.max_seq_length)
+        self.use_cf = args.cf
+        model = TopoSeqModel(max_num_edge=train_dataset.max_num_edge,
+                             max_seq_length=train_dataset.max_seq_length,
+                             max_face=args.max_face,
+                             use_cf=self.use_cf)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
@@ -211,15 +224,18 @@ class TopoSeqTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                # b*ne*2, b*ne, b*ns, b*ns
-                edgeFace_adj, edge_mask, topo_seq, seq_mask = data
+                if self.use_cf:
+                    edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label = data    # b*ne*2, b*ne, b*ns, b*ns, b*1
+                else:
+                    edgeFace_adj, edge_mask, topo_seq, seq_mask = data                 # b*ne*2, b*ne, b*ns, b*ns
+                    class_label = None
                 ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 ns = torch.nonzero(seq_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 edgeFace_adj = edgeFace_adj[:, :ne, :]
                 edge_mask = edge_mask[:, :ne]
                 topo_seq = topo_seq[:, :ns]
                 seq_mask = seq_mask[:, :ns]
-                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask)    # b*ns*(ne+2)
+                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label)       # b*ns*(ne+2)
 
                 # Zero gradient
                 self.optimizer.zero_grad()
@@ -256,15 +272,18 @@ class TopoSeqTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                # b*ne*2, b*ne, b*ns, b*ns
-                edgeFace_adj, edge_mask, topo_seq, seq_mask = data
+                if self.use_cf:
+                    edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label = data    # b*ne*2, b*ne, b*ns, b*ns, b*1
+                else:
+                    edgeFace_adj, edge_mask, topo_seq, seq_mask = data                 # b*ne*2, b*ne, b*ns, b*ns
+                    class_label = None
                 ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 ns = torch.nonzero(seq_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
                 edgeFace_adj = edgeFace_adj[:, :ne, :]
                 edge_mask = edge_mask[:, :ne]
                 topo_seq = topo_seq[:, :ns]
                 seq_mask = seq_mask[:, :ns]
-                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask)    # b*ns*(ne+2)
+                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label)    # b*ns*(ne+2)
 
                 # Loss
                 loss = self.train_loss(logits, topo_seq, seq_mask)

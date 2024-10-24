@@ -6,7 +6,6 @@ from torch.autograd import Function
 from weakref import WeakKeyDictionary
 import open3d as o3d
 
-
 EPS = np.finfo(np.float32).eps
 DTYPE = np.float64
 
@@ -420,7 +419,7 @@ def fitcone(points, weights=None, initial_guess: Cone = None):
             r_min = distance_line_point(c, a, points[np.argmin(proj)])
             h = np.max(proj) - np.min(proj)
             tan_theta2 = (r_max - r_min) / h
-            r0 = distance_line_point(c, a, points[np.argmin(proj**2)])
+            r0 = distance_line_point(c, a, points[np.argmin(proj ** 2)])
             if tan_theta2 < 0:
                 tan_theta2 = (r_min - r_max) / h
                 vertex2 = c + a * (r0 / tan_theta2 + iter * 0.5)
@@ -593,8 +592,8 @@ class Fit:
         for j in range(100):
             # p_ = (p - c) * (0.01) * j
             p_ = (
-                rel_unit_vector_min
-                + (rel_unit_vector_max - rel_unit_vector_min) * 0.01 * j
+                    rel_unit_vector_min
+                    + (rel_unit_vector_max - rel_unit_vector_min) * 0.01 * j
             )
 
             d_points = []
@@ -637,7 +636,7 @@ class Fit:
         lam = np.linspace(
             -radius + 1e-7, radius - 1e-7, 100
         )  # np.linspace(-1 + 1e-7, 1 - 1e-7, 100)
-        radii = np.sqrt(radius**2 - lam**2)  # radius * np.sqrt(1 - lam ** 2)
+        radii = np.sqrt(radius ** 2 - lam ** 2)  # radius * np.sqrt(1 - lam ** 2)
         circle = np.concatenate([circle] * lam.shape[0], 0)
         spread_radii = np.repeat(radii, d_theta, 0)
         new_circle = circle * spread_radii.reshape((-1, 1))
@@ -735,8 +734,8 @@ class Fit:
 
         center = -self.lstsq(A, Y, 0.01).reshape((1, 3))
         radius_square = (
-            torch.sum(weights[:, 0] * torch.sum((points - center) ** 2, 1))
-            / sum_weights
+                torch.sum(weights[:, 0] * torch.sum((points - center) ** 2, 1))
+                / sum_weights
         )
         radius_square = torch.clamp(radius_square, min=1e-3)
         radius = guard_sqrt(radius_square)
@@ -764,26 +763,37 @@ def tessalate_points_fast(vertices, size_u, size_v, mask=None):
 
     triangles = []
 
-    for i in range(0, size_u - 1):
-        for j in range(0, size_v - 1):
-            if mask is not None:
-                if mask[i, j] == 0:
-                    continue
-            tri = [
-                index_to_id(i, j, size_v),
-                index_to_id(i + 1, j, size_v),
-                index_to_id(i + 1, j + 1, size_v),
-            ]
-            triangles.append(tri)
-            tri = [
-                index_to_id(i, j, size_v),
-                index_to_id(i + 1, j + 1, size_v),
-                index_to_id(i, j + 1, size_v),
-            ]
-            triangles.append(tri)
+    i_indices = torch.arange(size_u - 1, device='cuda')
+    j_indices = torch.arange(size_v - 1, device='cuda')
+
+    i_mesh, j_mesh = torch.meshgrid(i_indices, j_indices, indexing='ij')
+
+    if mask is not None:
+        mask_tensor = torch.tensor(mask, device='cuda')
+        valid_mask = mask_tensor[i_mesh, j_mesh] != 0
+    else:
+        valid_mask = torch.ones_like(i_mesh, dtype=torch.bool, device='cuda')
+
+    for i in range(size_u - 1):
+        for j in range(size_v - 1):
+            if valid_mask[i, j]:
+                tri1 = [
+                    index_to_id(i, j, size_v),
+                    index_to_id(i + 1, j, size_v),
+                    index_to_id(i + 1, j + 1, size_v),
+                ]
+                triangles.append(tri1)
+                tri2 = [
+                    index_to_id(i, j, size_v),
+                    index_to_id(i + 1, j + 1, size_v),
+                    index_to_id(i, j + 1, size_v),
+                ]
+                triangles.append(tri2)
+
     new_mesh = o3d.geometry.TriangleMesh()
     new_mesh.triangles = o3d.utility.Vector3iVector(np.array(triangles))
     new_mesh.vertices = o3d.utility.Vector3dVector(np.stack(vertices, 0))
+
     new_mesh.remove_unreferenced_vertices()
     new_mesh.compute_vertex_normals()
     return new_mesh
@@ -802,8 +812,8 @@ def up_sample_points_torch_memory_efficient(points, times=1):
         for i in range(points.shape[0] // N):
             diff_ = torch.sum(
                 (
-                    torch.unsqueeze(points[i * N : (i + 1) * N], 1)
-                    - torch.unsqueeze(points, 0)
+                        torch.unsqueeze(points[i * N: (i + 1) * N], 1)
+                        - torch.unsqueeze(points, 0)
                 )
                 ** 2,
                 2,
@@ -840,20 +850,7 @@ def create_grid(inputs, grid_points, size_u, size_v, thres=0.02, device="cuda"):
     except:
         grid_mean_points = grid_mean_points.reshape(((size_u - 1) * (size_v - 1), 3))
 
-    diff = []
-    for i in range(grid_mean_points.shape[0]):
-        diff.append(
-            torch.sum(
-                (
-                    torch.unsqueeze(grid_mean_points[i : i + 1], 1)
-                    - torch.unsqueeze(inputs, 0)
-                )
-                ** 2,
-                2,
-            )
-        )
-    diff = torch.cat(diff, 0)
-    diff = torch.sqrt(diff)
+    diff = torch.sqrt(((grid_mean_points[:, None, :] - inputs[None, :, :]) ** 2).sum(dim=2))
     indices = torch.min(diff, 1)[0] < thres
     try:
         mask_grid = indices.reshape(((size_u + 1), (size_v + 1)))
@@ -867,6 +864,7 @@ def bit_mapping_points_torch(inputs, output_points, thres, size_u, size_v, mesh=
         inputs, output_points, size_u, size_v, thres=thres, device=device
     )
     mesh = tessalate_points_fast(output_points, size_u, size_v, mask=mask)
+
     return mesh
 
 
@@ -880,6 +878,7 @@ def visualize_basic_mesh(shape_type, in_points, pred, epsilon=0.1, device="cuda"
             e = epsilon
         else:
             e = 0.02
+
         pred_mesh = bit_mapping_points_torch(
             part_points, np.array(pred["plane_new_points"]), e, 120, 120, device=device
         )
@@ -892,6 +891,7 @@ def visualize_basic_mesh(shape_type, in_points, pred, epsilon=0.1, device="cuda"
             e = epsilon
         else:
             e = 0.03
+
         pred_mesh = bit_mapping_points_torch(
             part_points, np.array(pred["sphere_new_points"]), e, 100, 100, device=device
         )
@@ -905,6 +905,7 @@ def visualize_basic_mesh(shape_type, in_points, pred, epsilon=0.1, device="cuda"
             e = epsilon
         else:
             e = 0.03
+
         pred_mesh = bit_mapping_points_torch(
             part_points,
             np.array(pred["cylinder_new_points"]),
@@ -924,6 +925,7 @@ def visualize_basic_mesh(shape_type, in_points, pred, epsilon=0.1, device="cuda"
             e = 0.03
         try:
             N = np.array(pred["cone_new_points"]).shape[0] // 51
+
             pred_mesh = bit_mapping_points_torch(
                 part_points, np.array(pred["cone_new_points"]), e, N, 51, device=device
             )
@@ -936,8 +938,7 @@ def visualize_basic_mesh(shape_type, in_points, pred, epsilon=0.1, device="cuda"
     return pred_mesh
 
 
-def process_one_surface(points, device, weights=None):
-
+def process_one_surface(points, device, weights=None, face_id=0):
     points = torch.from_numpy(points).to(device)
     weights = torch.from_numpy(weights).to(device) if weights is not None else torch.ones_like(points)[:, :1]
 
@@ -978,21 +979,21 @@ def process_one_surface(points, device, weights=None):
     #     if recon_basic_shapes["cone_params"][2] >= 1.53:
     #         cone_err = np.inf
     if (
-        len(
-            visualize_basic_mesh(
-                "cylinder", points, recon_basic_shapes, device=device
-            ).vertices
-        )
-        == 0
+            len(
+                visualize_basic_mesh(
+                    "cylinder", points, recon_basic_shapes, device=device
+                ).vertices
+            )
+            == 0
     ):
         cylinder_err = np.inf
     if (
-        len(
-            visualize_basic_mesh(
-                "sphere", points, recon_basic_shapes, device=device
-            ).vertices
-        )
-        == 0
+            len(
+                visualize_basic_mesh(
+                    "sphere", points, recon_basic_shapes, device=device
+                ).vertices
+            )
+            == 0
     ):
         sphere_err = np.inf
 
@@ -1000,19 +1001,19 @@ def process_one_surface(points, device, weights=None):
     pred_shape = sorted_shape_indices[0]
 
     out = {}
-    if pred_shape == 0:      # plane
+    if pred_shape == 0:  # plane
         out['type'] = 'plane'
         out['params'] = recon_basic_shapes['plane_params']
         out['err'] = recon_basic_shapes['plane_err']
-    elif pred_shape == 1:    # sphere
+    elif pred_shape == 1:  # sphere
         out['type'] = 'sphere'
         out['params'] = recon_basic_shapes['sphere_params']
         out['err'] = recon_basic_shapes['sphere_err']
-    elif pred_shape == 2:    # cylinder
+    elif pred_shape == 2:  # cylinder
         out['type'] = 'cylinder'
         out['params'] = recon_basic_shapes['cylinder_params']
         out['err'] = recon_basic_shapes['cylinder_err']
-    elif pred_shape == 3:    # cone
+    elif pred_shape == 3:  # cone
         out['type'] = 'cone'
         out['params'] = recon_basic_shapes['cone_params']
         out['err'] = recon_basic_shapes['cone_err']
@@ -1033,6 +1034,8 @@ def project_to_plane(points, a, d):
 
 
 from sklearn.linear_model import RANSACRegressor
+
+
 def fit_cylinder_ransac(points, min_samples=3, residual_threshold=0.1, max_trials=100):
     # 提取点的坐标
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
