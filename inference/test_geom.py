@@ -1,59 +1,43 @@
-import argparse
 import os
+import yaml
 import torch
 import pickle
 import random
 from tqdm import tqdm
+from argparse import Namespace
 import torch.multiprocessing as mp
 from diffusers import DDPMScheduler, PNDMScheduler
 from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer
 from utils import check_step_ok, sort_bbox_multi
 from OCC.Extend.DataExchange import write_step_file
-from visualization import *
-from brepBuild import Brep2Mesh
-from generate import get_brep, get_faceBbox, get_vertGeom, get_edgeGeom, text2int
+from inference.brepBuild import Brep2Mesh
+from inference.generate import get_brep, get_faceBbox, get_vertGeom, get_edgeGeom, text2int
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def get_args_generate():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom_01/epoch_3000.pt')
-    parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/geom_edgeGeom/epoch_3000.pt')
-    parser.add_argument('--vertGeom_path', type=str, default='checkpoints/furniture/geom_vertGeom/epoch_3000.pt')
-    parser.add_argument('--faceBbox_path', type=str, default='checkpoints/furniture/geom_faceBbox/epoch_3000.pt')
-    parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
-    parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
-    parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
-    parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
-    parser.add_argument("--cf", action='store_false', help='Use class condition')
-    args = parser.parse_args()
-
-    return args
-
-
-def get_ok_step(batch_size, mode='train'):
-    with open("data_process/furniture_data_split_6bit.pkl", 'rb') as f:
+def get_ok_step(batch_size, mode='test', dataset_name='deepcad'):
+    with open(os.path.join('data_process', dataset_name+'_data_split_6bit.pkl'), 'rb') as f:
         if mode == 'train':
             datas = pickle.load(f)[mode]
         else:
             assert mode == 'test'
             datas = pickle.load(f)
-            datas = datas['test'] + datas['val']
+            datas = datas['test']
     datas = random.sample(datas, len(datas))
     batch_file = []
     while len(batch_file) < batch_size and datas:
         file = datas.pop(0)
-        with open(os.path.join('data_process/GeomDatasets/furniture_parsed', file), 'rb') as tf:
+        with open(os.path.join('data_process/GeomDatasets', dataset_name+'_parsed', file), 'rb') as tf:
             if check_step_ok(pickle.load(tf)):
                 batch_file.append(file)
 
     return batch_file
 
 
-def get_topology(files, device):
+def get_topology(files, device, dataset_name):
     """****************Brep Topology****************"""
     edgeVert_adj = []
     edgeFace_adj = []
@@ -68,7 +52,7 @@ def get_topology(files, device):
     file_name = []
 
     for file in files:
-        with open(os.path.join('data_process/GeomDatasets/furniture_parsed', file), 'rb') as tf:
+        with open(os.path.join('data_process/GeomDatasets', dataset_name+'_parsed', file), 'rb') as tf:
             data = pickle.load(tf)
 
         edgeVert_adj.append(torch.from_numpy(data['edgeVert_adj']).to(device))                    # [ne*2, ...]
@@ -87,14 +71,13 @@ def get_topology(files, device):
             'name': file_name, 'vv_list': vv_list, "vertFace_adj": vertFace_adj, "fef_adj": fef_adj}
 
 
-def main():
+def main(args):
 
-    # batch_file = get_ok_step(150, mode='test')
-    # with open('batch_file_test.pkl', 'wb') as f:
-    #     pickle.dump(batch_file, f)
+    # dataset_name = 'deepcad'
+    # test_files = get_ok_step(120, mode='test', dataset_name=dataset_name)
+    # with open(os.path.join('inference', dataset_name+'_test.pkl'), 'wb') as f:
+    #     pickle.dump(test_files, f)
     # return
-
-    args = get_args_generate()
 
     # Make project directory if not exist
     if not os.path.exists(args.save_folder):
@@ -103,34 +86,32 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initial FaceBboxTransformer
-    hidden_mlp_dims = {'x': 256}
-    hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-    FaceBbox_model = FaceBboxTransformer(n_layers=8,
-                                         hidden_mlp_dims=hidden_mlp_dims,
-                                         hidden_dims=hidden_dims,
+    FaceBbox_model = FaceBboxTransformer(n_layers=args.FaceBboxModel['n_layers'],
+                                         hidden_mlp_dims=args.FaceBboxModel['hidden_mlp_dims'],
+                                         hidden_dims=args.FaceBboxModel['hidden_dims'],
                                          edge_classes=args.edge_classes,
                                          act_fn_in=torch.nn.ReLU(),
                                          act_fn_out=torch.nn.ReLU(),
-                                         use_cf=args.cf)
+                                         use_cf=args.use_cf)
     FaceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
     FaceBbox_model = FaceBbox_model.to(device).eval()
 
     # Initial VertGeomTransformer
-    hidden_mlp_dims = {'x': 256}
-    hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-    vertGeom_model = VertGeomTransformer(n_layers=8,
-                                         hidden_mlp_dims=hidden_mlp_dims,
-                                         hidden_dims=hidden_dims,
+    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layer'],
+                                         hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
+                                         hidden_dims=args.VertGeomModel['hidden_dims'],
                                          act_fn_in=torch.nn.ReLU(),
                                          act_fn_out=torch.nn.ReLU(),
-                                         use_cf=args.cf)
+                                         use_cf=args.use_cf)
     vertGeom_model.load_state_dict(torch.load(args.vertGeom_path))
     vertGeom_model = vertGeom_model.to(device).eval()
 
     # Initial EdgeGeomTransformer
-    edgeGeom_model = EdgeGeomTransformer(n_layers=8,
-                                         edge_geom_dim=12,
-                                         use_cf=args.cf)
+    edgeGeom_model = EdgeGeomTransformer(n_layers=args.EdgeGeomModel['n_layers'],
+                                         edge_geom_dim=args.EdgeGeomModel['edge_geom_dim'],
+                                         d_model=args.EdgeGeomModel['d_model'],
+                                         nhead=args.EdgeGeomModel['nhead'],
+                                         use_cf=args.use_cf)
     edgeGeom_model.load_state_dict(torch.load(args.edgeGeom_path))
     edgeGeom_model = edgeGeom_model.to(device).eval()
 
@@ -152,16 +133,16 @@ def main():
         clip_sample_range=3
     )
 
-    with open('batch_file_test.pkl', 'rb') as f:
+    with open('furniture_test.pkl', 'rb') as f:
         batch_file = pickle.load(f)
 
-    batch_file = ['chair/partstudio_partstudio_0104.pkl']
+    # batch_file = ['chair/partstudio_partstudio_0104.pkl']
 
     b_each = 16
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(batch_file[i:i + b_each], device)
+        datas = get_topology(batch_file[i:i + b_each], device, name)
         fef_adj, edgeVert_adj, faceEdge_adj, edgeFace_adj, vv_list, vertFace_adj = (datas["fef_adj"],
                                                                                     datas["edgeVert_adj"],
                                                                                     datas['faceEdge_adj'],
@@ -214,4 +195,13 @@ def main():
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
-    main()
+
+    name = 'deepcad'
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file).get(name, {})
+    config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
+    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
+    config['faceBbox_path'] = os.path.join('checkpoints', name, 'geom_faceBbox/epoch_3000.pt')
+    config['save_folder'] = os.path.join('samples', name)
+
+    main(args=Namespace(**config))

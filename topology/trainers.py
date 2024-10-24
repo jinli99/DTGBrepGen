@@ -3,34 +3,7 @@ import wandb
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from model import TopoSeqModel, FaceEdgeModel
-
-
-class MultiClassFocalLossWithAlpha(nn.Module):
-    def __init__(self, alpha, gamma=2, reduction='mean'):
-        """
-        :param alpha: weight for each class
-        :param gamma:
-        :param reduction:
-        """
-        super(MultiClassFocalLossWithAlpha, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        alpha = self.alpha[target]  # shape=(bs,)
-        log_softmax = torch.log_softmax(pred, dim=1)   # shape=(bs, m)
-        log_pt = torch.gather(log_softmax, dim=1, index=target.view(-1, 1))  # shape=(bs, 1)
-        log_pt = log_pt.reshape(-1)  # shape=(bs)
-        ce_loss = -log_pt
-        pt = torch.exp(log_pt)  # shape=(bs)
-        focal_loss = alpha * (1 - pt) ** self.gamma * ce_loss  # multi class focal loss，shape=(bs)
-        if self.reduction == "mean":
-            return torch.mean(focal_loss)
-        if self.reduction == "sum":
-            return torch.sum(focal_loss)
-        return focal_loss
+from model import EdgeVertModel, FaceEdgeModel
 
 
 class FaceEdgeTrainer:
@@ -40,8 +13,14 @@ class FaceEdgeTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.save_dir = args.save_dir
         self.edge_classes = args.edge_classes
-        self.use_cf = args.cf
-        model = FaceEdgeModel(nf=args.max_face, num_categories=args.edge_classes, use_cf=self.use_cf)
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
+        model = FaceEdgeModel(nf=args.max_face,
+                              d_model=args.FaceEdgeModel['d_model'],
+                              nhead=args.FaceEdgeModel['nhead'],
+                              n_layers=args.FaceEdgeModel['n_layers'],
+                              num_categories=args.edge_classes,
+                              use_cf=self.use_cf)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
@@ -52,10 +31,6 @@ class FaceEdgeTrainer:
                                                           shuffle=False,
                                                           batch_size=args.batch_size,
                                                           num_workers=16)
-
-        # alpha = 1 - torch.tensor([8.6229e-01, 1.3391e-01, 3.6014e-03, 1.6260e-04, 3.3725e-05], device=self.device)
-        # alpha = (alpha / alpha.sum()).float()
-        # self.class_loss = MultiClassFocalLossWithAlpha(alpha=alpha)
 
         # Initialize optimizer
         self.network_params = list(self.model.parameters())
@@ -93,13 +68,13 @@ class FaceEdgeTrainer:
 
                 # b*seq_len*m, b*latent_dim, b*latent_dim
                 adj, mu, logvar = self.model(fef_adj_upper, class_label)
+
                 # Loss
                 assert not torch.isnan(adj).any()
                 kl_divergence = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
                 recon_loss = torch.nn.functional.cross_entropy(adj.reshape(-1, adj.shape[-1]),
                                                                fef_adj_upper.reshape(-1),
                                                                reduction='mean')
-                # recon_loss = self.class_loss(adj.reshape(-1, adj.shape[-1]), fef_adj_upper.reshape(-1))
                 loss = recon_loss + kl_divergence
 
                 # Update model
@@ -164,17 +139,23 @@ class FaceEdgeTrainer:
         return
 
 
-class TopoSeqTrainer:
+class EdgeVertTrainer:
     def __init__(self, args, train_dataset, val_dataset):
         self.iters = 0
         self.epoch = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.save_dir = args.save_dir
-        self.use_cf = args.cf
-        model = TopoSeqModel(max_num_edge=train_dataset.max_num_edge,
-                             max_seq_length=train_dataset.max_seq_length,
-                             max_face=args.max_face,
-                             use_cf=self.use_cf)
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
+
+        model = EdgeVertModel(max_num_edge=args.max_num_edge_topo,
+                              max_seq_length=args.max_seq_length,
+                              edge_classes=args.edge_classes,
+                              max_face=args.max_face,
+                              max_edge=args.max_edge,
+                              d_model=args.EdgeVertModel['d_model'],
+                              n_layers=args.EdgeVertModel['n_layers'],
+                              use_cf=self.use_cf)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,

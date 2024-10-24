@@ -213,54 +213,27 @@ def create_topo_datasets(data_type='train', option='deepcad'):
     print(valid)
 
 
-class FaceEdgeDataset(torch.utils.data.Dataset):
+class EdgeVertDataset(torch.utils.data.Dataset):
     def __init__(self, path, args):
         self.data = load_data_with_prefix(path, '.pkl')
-        self.max_face = args.max_face
-        self.max_edge = args.edge_classes - 1
-        self.use_cf = args.cf
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-
-        with open(self.data[idx], "rb") as tf:
-            data = pickle.load(tf)
-        fef_adj = data['fef_adj']                                            # nf*nf
-        edge_counts = np.sum(fef_adj, axis=1)                                # nf
-        sorted_ids = np.argsort(edge_counts)                                 # nf
-        fef_adj = fef_adj[sorted_ids][:, sorted_ids]
-        assert np.all(fef_adj == fef_adj.transpose(0, 1))
-        fef_adj, mask = pad_zero(fef_adj, max_len=self.max_face, dim=1)      # max_face*max_face, max_face
-
-        if self.use_cf:
-            data_class = text2int[data['name'].split('_')[0]] + 1
-            return torch.from_numpy(fef_adj), torch.from_numpy(mask), torch.LongTensor([data_class])
-        else:
-            return torch.from_numpy(fef_adj), torch.from_numpy(mask)
-
-
-class TopoSeqDataset(torch.utils.data.Dataset):
-    def __init__(self, path, args):
-        self.data = load_data_with_prefix(path, '.pkl')
-        max_num_edge = 0
-        max_seq_length = 0
-        for file in self.data:
-            with open(file, "rb") as tf:
-                data = pickle.load(tf)
-                length = [len(i) for i in data['topo_seq']]
-                max_seq_length = max(sum(length) + len(length), max_seq_length)
-                max_num_edge = max(max_num_edge, data['edgeFace_adj'].shape[0])
-        self.max_seq_length = max_seq_length
-        self.max_num_edge = max_num_edge
-        self.data_aug = args.data_aug
-        self.use_cf = args.cf
+        # max_num_edge = 0
+        # max_seq_length = 0
+        # for file in self.data:
+        #     with open(file, "rb") as tf:
+        #         data = pickle.load(tf)
+        #         length = [len(i) for i in data['topo_seq']]
+        #         max_seq_length = max(sum(length) + len(length), max_seq_length)
+        #         max_num_edge = max(max_num_edge, data['edgeFace_adj'].shape[0])
+        self.max_seq_length = args.max_seq_length
+        self.max_num_edge_topo = args.max_num_edge_topo
+        self.aug = args.data_aug
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
 
     def swap_in_sublist(self, sublist, swap_prob=0.1):
         arr = np.array(sublist)
 
-        if self.data_aug and np.random.random() < swap_prob:
+        if self.aug and np.random.random() < swap_prob:
             idx1, idx2 = np.random.choice(len(arr)-1, 2, replace=False)
 
             arr[idx1], arr[idx2] = arr[idx2], arr[idx1]
@@ -308,7 +281,7 @@ class TopoSeqDataset(torch.utils.data.Dataset):
 
         # data augment
         shuffle_prob = 2
-        if self.data_aug and np.random.random() < shuffle_prob:
+        if self.aug and np.random.random() < shuffle_prob:
             edgeFace_adj, topo_seq = self.shuffle_idx(data['faceEdge_adj'],
                                                       data['edgeFace_adj'],
                                                       data['edgeVert_adj'])
@@ -316,8 +289,8 @@ class TopoSeqDataset(torch.utils.data.Dataset):
             edgeFace_adj, topo_seq = data['edgeFace_adj'], data['topo_seq']    # ne*2, List[List[int]]
         topo_seq = [self.swap_in_sublist(sublist) for sublist in topo_seq]
 
-        assert edgeFace_adj.shape[0] <= self.max_num_edge
-        edgeFace_adj, edge_mask = pad_zero(edgeFace_adj, max_len=self.max_num_edge)   # max_num_edge*2, max_num_edge
+        assert edgeFace_adj.shape[0] <= self.max_num_edge_topo
+        edgeFace_adj, edge_mask = pad_zero(edgeFace_adj, max_len=self.max_num_edge_topo)   # max_num_edge*2, max_num_edge
 
         topo_seq = np.expand_dims(np.array(list(chain.from_iterable(sublist + [-2] for sublist in topo_seq))), axis=-1)
         topo_seq, seq_mask = pad_zero(topo_seq, max_len=self.max_seq_length)        # max_seq_length*1, max_seq_length
@@ -336,6 +309,35 @@ class TopoSeqDataset(torch.utils.data.Dataset):
                     torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
                     torch.from_numpy(seq_mask).squeeze(-1)     # max_seq_length
                     )
+
+
+class FaceEdgeDataset(torch.utils.data.Dataset):
+    def __init__(self, path, args):
+        self.data = load_data_with_prefix(path, '.pkl')
+        self.max_face = args.max_face
+        self.max_edge = args.edge_classes - 1
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+
+        with open(self.data[idx], "rb") as tf:
+            data = pickle.load(tf)
+        fef_adj = data['fef_adj']                                            # nf*nf
+        edge_counts = np.sum(fef_adj, axis=1)                                # nf
+        sorted_ids = np.argsort(edge_counts)                                 # nf
+        fef_adj = fef_adj[sorted_ids][:, sorted_ids]
+        assert np.all(fef_adj == fef_adj.transpose(0, 1))
+        fef_adj, mask = pad_zero(fef_adj, max_len=self.max_face, dim=1)      # max_face*max_face, max_face
+
+        if self.use_cf:
+            data_class = text2int[data['name'].split('_')[0]] + 1
+            return torch.from_numpy(fef_adj), torch.from_numpy(mask), torch.LongTensor([data_class])
+        else:
+            return torch.from_numpy(fef_adj), torch.from_numpy(mask)
 
 
 if __name__ == '__main__':

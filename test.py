@@ -1,18 +1,6 @@
-import os
-import pickle
-import random
-import shutil
-import trimesh
 import yaml
 import torch.multiprocessing as mp
-import numpy as np
-from tqdm import tqdm
-from utils import check_step_ok, load_data_with_prefix
-from OCC.Extend.DataExchange import write_stl_file, write_step_file
-from visualization import *
-from brepBuild import (create_bspline_surface, create_bspline_curve,
-                       sample_bspline_surface, sample_bspline_curve, joint_optimize, construct_brep)
-from collections import defaultdict
+
 
 #
 #

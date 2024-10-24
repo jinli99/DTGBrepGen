@@ -1,10 +1,11 @@
-import argparse
 import os
+import yaml
 import torch
 import torch.multiprocessing as mp
+from argparse import Namespace
 from tqdm import tqdm
 from diffusers import DDPMScheduler, PNDMScheduler
-from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer, FaceEdgeModel, TopoSeqModel
+from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer, FaceEdgeModel, EdgeVertModel
 from topology.topoGenerate import SeqGenerator
 from topology.transfer import faceVert_from_edgeVert, face_vert_trans, fef_from_faceEdge
 from utils import xe_mask, pad_zero, sort_bbox_multi, generate_random_string, make_mask, pad_and_stack
@@ -31,25 +32,7 @@ text2int = {'uncond':0,
 
 int2text = {v: k for k, v in text2int.items()}
 
-def get_args_generate():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--FaceEdge_path', type=str, default='checkpoints/furniture/topo_faceEdge/epoch_2000.pt')
-    parser.add_argument('--TopoSeq_path', type=str, default='checkpoints/furniture/topo_Seq/epoch_3000.pt')
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom/epoch_3000.pt')
-    parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/geom_edgeGeom/epoch_3000.pt')
-    parser.add_argument('--vertGeom_path', type=str, default='checkpoints/furniture/geom_vertGeom/epoch_3000.pt')
-    parser.add_argument('--faceBbox_path', type=str, default='checkpoints/furniture/geom_faceBbox/epoch_3000.pt')
-    parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
-    parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
-    parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
-    parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
-    parser.add_argument("--cf", action='store_false', help='Use class condition')
-    args = parser.parse_args()
-
-    return args
-
-
-def get_topology(batch, faceEdge_model, seq_model, device, labels):
+def get_topology(batch, faceEdge_model, edgeVert_model, device, labels):
     """****************Brep Topology****************"""
     edgeVert_adj = []
     edgeFace_adj = []
@@ -59,7 +42,10 @@ def get_topology(batch, faceEdge_model, seq_model, device, labels):
 
     valid = 0
 
-    class_label = torch.LongTensor(labels).to(device).reshape(-1, 1)
+    if labels is not None:
+        class_label = torch.LongTensor(labels).to(device).reshape(-1, 1)
+    else:
+        class_label = None
     fail_idx = []
 
     with torch.no_grad():
@@ -71,7 +57,7 @@ def get_topology(batch, faceEdge_model, seq_model, device, labels):
             non_zero_mask = torch.any(adj != 0, dim=1)
             adj = adj[non_zero_mask][:, non_zero_mask]                                             # nf*nf
             edge_counts = torch.sum(adj, dim=1)                                                    # nf
-            if edge_counts.max() > seq_model.max_edge:
+            if edge_counts.max() > edgeVert_model.max_edge:
                 continue
             sorted_ids = torch.argsort(edge_counts)                                                # nf
             adj = adj[sorted_ids][:, sorted_ids]
@@ -80,19 +66,19 @@ def get_topology(batch, faceEdge_model, seq_model, device, labels):
             ef_adj = edge_indices.repeat_interleave(num_edges, dim=0)                              # ne*2
 
             # save encoder information
-            seq_model.save_cache(edgeFace_adj=ef_adj.unsqueeze(0),
-                                 edge_mask=torch.ones((1, ef_adj.shape[0]), device=device, dtype=torch.bool),
-                                 class_label=class_label[[i]])
+            edgeVert_model.save_cache(edgeFace_adj=ef_adj.unsqueeze(0),
+                                      edge_mask=torch.ones((1, ef_adj.shape[0]), device=device, dtype=torch.bool),
+                                      class_label=class_label[[i]] if class_label is not None else None)
             for try_time in range(10):
                 generator = SeqGenerator(ef_adj.cpu().numpy())
-                if generator.generate(seq_model, class_label[[i]]):
+                if generator.generate(edgeVert_model, class_label[[i]]):
                     # print("Construct Brep Topology succeed at time %d!" % try_time)
-                    seq_model.clear_cache()
+                    edgeVert_model.clear_cache()
                     valid += 1
                     break
             else:
                 # print("Construct Brep Topology Failed!")
-                seq_model.clear_cache()
+                edgeVert_model.clear_cache()
                 fail_idx.append(i)
                 continue
 
@@ -382,9 +368,7 @@ def get_brep(args):
     return solid
 
 
-def main():
-
-    args = get_args_generate()
+def main(args):
 
     # Make project directory if not exist
     if not os.path.exists(args.save_folder):
@@ -393,42 +377,52 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initial Topology Model
-    faceEdge_model = FaceEdgeModel(nf=32, num_categories=5, use_cf=args.cf)
+    faceEdge_model = FaceEdgeModel(nf=args.max_face,
+                                   d_model=args.FaceEdgeModel['d_model'],
+                                   nhead=args.FaceEdgeModel['nhead'],
+                                   n_layers=args.FaceEdgeModel['n_layers'],
+                                   num_categories=args.edge_classes,
+                                   use_cf=args.use_cf)
     faceEdge_model.load_state_dict(torch.load(args.FaceEdge_path), strict=False)
     faceEdge_model = faceEdge_model.to(device).eval()
-    seq_model = TopoSeqModel(max_num_edge=96, max_seq_length=260, max_face=32, use_cf=args.cf)
-    seq_model.load_state_dict(torch.load(args.TopoSeq_path), strict=False)
-    seq_model = seq_model.to(device).eval()
+    edgeVert_model = EdgeVertModel(max_num_edge=args.max_num_edge_topo,
+                                   max_seq_length=args.max_seq_length,
+                                   edge_classes=args.edge_classes,
+                                   max_face=args.max_face,
+                                   max_edge=args.max_edge,
+                                   d_model=args.EdgeVertModel['d_model'],
+                                   n_layers=args.EdgeVertModel['n_layers'],
+                                   use_cf=args.use_cf)
+    edgeVert_model.load_state_dict(torch.load(args.EdgeVert_path), strict=False)
+    edgeVert_model = edgeVert_model.to(device).eval()
 
     # Initial FaceBboxTransformer
-    hidden_mlp_dims = {'x': 256}
-    hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-    FaceBbox_model = FaceBboxTransformer(n_layers=8,
-                                         hidden_mlp_dims=hidden_mlp_dims,
-                                         hidden_dims=hidden_dims,
+    FaceBbox_model = FaceBboxTransformer(n_layers=args.FaceBboxModel['n_layers'],
+                                         hidden_mlp_dims=args.FaceBboxModel['hidden_mlp_dims'],
+                                         hidden_dims=args.FaceBboxModel['hidden_dims'],
                                          edge_classes=args.edge_classes,
                                          act_fn_in=torch.nn.ReLU(),
                                          act_fn_out=torch.nn.ReLU(),
-                                         use_cf=args.cf)
+                                         use_cf=args.use_cf)
     FaceBbox_model.load_state_dict(torch.load(args.faceBbox_path))
     FaceBbox_model = FaceBbox_model.to(device).eval()
 
     # Initial VertGeomTransformer
-    hidden_mlp_dims = {'x': 256}
-    hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-    vertGeom_model = VertGeomTransformer(n_layers=4,
-                                         hidden_mlp_dims=hidden_mlp_dims,
-                                         hidden_dims=hidden_dims,
+    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layer'],
+                                         hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
+                                         hidden_dims=args.VertGeomModel['hidden_dims'],
                                          act_fn_in=torch.nn.ReLU(),
                                          act_fn_out=torch.nn.ReLU(),
-                                         use_cf=args.cf)
+                                         use_cf=args.use_cf)
     vertGeom_model.load_state_dict(torch.load(args.vertGeom_path))
     vertGeom_model = vertGeom_model.to(device).eval()
 
     # Initial EdgeGeomTransformer
-    edgeGeom_model = EdgeGeomTransformer(n_layers=8,
-                                         edge_geom_dim=12,
-                                         use_cf=args.cf)
+    edgeGeom_model = EdgeGeomTransformer(n_layers=args.EdgeGeomModel['n_layers'],
+                                         edge_geom_dim=args.EdgeGeomModel['edge_geom_dim'],
+                                         d_model=args.EdgeGeomModel['d_model'],
+                                         nhead=args.EdgeGeomModel['nhead'],
+                                         use_cf=args.use_cf)
     edgeGeom_model.load_state_dict(torch.load(args.edgeGeom_path))
     edgeGeom_model = edgeGeom_model.to(device).eval()
 
@@ -461,7 +455,7 @@ def main():
             class_label = None
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(b, faceEdge_model, seq_model, device, class_label)
+        datas = get_topology(b, faceEdge_model, edgeVert_model, device, class_label)
         fef_adj, edgeVert_adj, faceEdge_adj, edgeFace_adj, vertFace_adj = (datas["fef_adj"],
                                                                            datas["edgeVert_adj"],
                                                                            datas['faceEdge_adj'],
@@ -499,7 +493,10 @@ def main():
 
             if solid is False:
                 continue
-            write_step_file(solid, f'{args.save_folder}/{int2text[class_label[j]]}_{generate_random_string(10)}.step')
+            if class_label is not None:
+                write_step_file(solid, f'{args.save_folder}/{int2text[class_label[j]]}_{generate_random_string(10)}.step')
+            else:
+                write_step_file(solid, f'{args.save_folder}/{generate_random_string(15)}.step')
 
     print('write stl...')
     mesh_tool = Brep2Mesh(input_path=args.save_folder)
@@ -508,4 +505,15 @@ def main():
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
-    main()
+
+    name = 'deepcad'
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file).get(name, {})
+    config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
+    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
+    config['faceBbox_path'] = os.path.join('checkpoints', name, 'geom_faceBbox/epoch_3000.pt')
+    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_2000.pt')
+    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_3000.pt')
+    config['save_folder'] = os.path.join('samples', name)
+
+    main(args=Namespace(**config))

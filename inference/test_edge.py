@@ -1,39 +1,24 @@
-import argparse
 import os
+import yaml
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
 import pickle
 from model import EdgeGeomTransformer
 from diffusers import PNDMScheduler, DDPMScheduler
+from argparse import Namespace
 from utils import sort_bbox_multi
 from OCC.Extend.DataExchange import write_step_file
 from brepBuild import Brep2Mesh
-from generate import get_brep, get_edgeGeom, text2int
+from inference.generate import get_brep, get_edgeGeom, text2int
 from test_geom import get_topology
-from visualization import *
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def get_args_generate():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--faceGeom_path', type=str, default='checkpoints/furniture/geom_faceGeom/epoch_3000.pt')
-    parser.add_argument('--edgeGeom_path', type=str, default='checkpoints/furniture/geom_edgeGeom/epoch_3000.pt')
-    parser.add_argument('--edge_classes', type=int, default=5, help='Number of edge classes')
-    parser.add_argument('--max_edge', type=int, default=30, help='maximum number of edges per face')
-    parser.add_argument('--save_folder', type=str, default="samples/furniture", help='save folder.')
-    parser.add_argument('--bbox_scaled', type=float, default=3, help='scaled the bbox')
-    parser.add_argument("--cf", action='store_false', help='Use class condition')
-    args = parser.parse_args()
-
-    return args
-
-
-def main():
-    args = get_args_generate()
+def main(args):
 
     # Make project directory if not exist
     if not os.path.exists(args.save_folder):
@@ -42,9 +27,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initial EdgeGeomTransformer
-    edgeGeom_model = EdgeGeomTransformer(n_layers=8,
-                                         edge_geom_dim=12,
-                                         use_cf=args.cf)
+    edgeGeom_model = EdgeGeomTransformer(n_layers=args.EdgeGeomModel['n_layers'],
+                                         edge_geom_dim=args.EdgeGeomModel['edge_geom_dim'],
+                                         d_model=args.EdgeGeomModel['d_model'],
+                                         nhead=args.EdgeGeomModel['nhead'],
+                                         use_cf=args.use_cf)
     edgeGeom_model.load_state_dict(torch.load(args.edgeGeom_path))
     edgeGeom_model = edgeGeom_model.to(device).eval()
 
@@ -66,16 +53,16 @@ def main():
         clip_sample_range=3
     )
 
-    with open('batch_file_test.pkl', 'rb') as f:
+    with open(args.test_path, 'rb') as f:
         batch_file = pickle.load(f)
 
-    batch_file = ['couch/partstudio_0122.pkl']
+    # batch_file = ['couch/partstudio_0122.pkl']
 
     b_each = 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(batch_file[i:i + b_each], device)
+        datas = get_topology(batch_file[i:i + b_each], device, name)
         face_bbox, edgeVert_adj, faceEdge_adj, edgeFace_adj, vert_geom = (datas["face_bbox"],
                                                                           datas["edgeVert_adj"],
                                                                           datas['faceEdge_adj'],
@@ -85,7 +72,7 @@ def main():
         face_bbox = [sort_bbox_multi(i)*args.bbox_scaled for i in face_bbox]     # [nf*6, ...]
         vert_geom = [i*args.bbox_scaled for i in vert_geom]                      # [nv*3, ...]
 
-        if args.cf:
+        if args.use_cf:
             class_label = [text2int[i.split('_')[0]] for i in datas['name']]
         else:
             class_label = None
@@ -117,4 +104,12 @@ def main():
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
-    main()
+
+    name = 'deepcad'
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file).get(name, {})
+    config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_500.pt')
+    config['test_path'] = os.path.join('inference', name+'_test.pkl')
+    config['save_folder'] = os.path.join('samples', name)
+
+    main(args=Namespace(**config))

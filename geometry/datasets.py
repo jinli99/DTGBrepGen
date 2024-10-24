@@ -4,16 +4,35 @@ import math
 import pickle
 import numpy as np
 import random
+from collections import defaultdict
 from tqdm import tqdm
-from diffusers import DDPMScheduler
 from multiprocessing.pool import Pool
 from utils import pad_and_stack, pad_zero, sort_bbox_multi, check_step_ok
-from topology.transfer import face_vert_trans
 
 
 # furniture class labels
 text2int = {'bathtub': 0, 'bed': 1, 'bench': 2, 'bookshelf': 3, 'cabinet': 4, 'chair': 5, 'couch': 6, 'lamp': 7,
             'sofa': 8, 'table': 9}
+
+
+def compute_dataset_info(name='furniture'):
+
+    with open(os.path.join('data_process', name+'_data_split_6bit.pkl'), "rb") as file:
+        datas = pickle.load(file)['train']
+
+    max_num_edge = 0
+    max_vert = 0
+    max_vertFace = 0
+    for path in datas:
+        with open(os.path.join('data_process/GeomDatasets', name+'_parsed', path), 'rb') as file:
+            data = pickle.load(file)
+            fef_adj = data['fef_adj']
+            max_num_edge = max(max_num_edge, len(data['edgeFace_adj']))
+            max_vert = max(max_vert, len(data['vert_wcs']))
+            max_vertFace = max(max_vertFace, max([len(i) for i in data['vertFace_adj']]))
+            assert np.array_equal(fef_adj, fef_adj.T) and np.all(np.diag(fef_adj) == 0)
+
+    print(f'{name} dataset has max_num_edge:{max_num_edge}, max_vert:{max_vert}, max_vertFace:{max_vertFace}')
 
 
 def rotate_point_cloud(point_cloud, angle_degrees, axis):
@@ -85,19 +104,20 @@ def load_data(input_data, input_list, validate, args):
     # Filter data list
     with open(input_list, "rb") as tf:
         if validate:
-            data_list = pickle.load(tf)['val']
+            data_list = pickle.load(tf)['test']
         else:
             data_list = pickle.load(tf)['train']
 
     data_paths = []
     data_classes = []
+
     for uid in data_list:
-        try:
-            path = os.path.join(input_data, str(math.floor(int(uid.split('.')[0]) / 10000)).zfill(4), uid)
-            class_label = -1   # unconditional generation (abc/deepcad)
-        except Exception:
-            path = os.path.join(input_data, uid)
-            class_label = text2int[uid.split('/')[0]]   # conditional generation (furniture)
+        path = os.path.join(input_data, uid)
+        if args.use_cf:
+            class_label = text2int[uid.split('/')[0]]      # conditional generation (furniture)
+        else:
+            class_label = -1                               # unconditional generation (abc/deepcad)
+
         data_paths.append(path)
         data_classes.append(class_label)
 
@@ -217,14 +237,16 @@ class EdgeVaeData(torch.utils.data.Dataset):
 class FaceBboxData(torch.utils.data.Dataset):
     """ Face Bounding Box Dataloader """
 
-    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+    def __init__(self, args, validate=False):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
         self.bbox_scaled = args.bbox_scaled
-        self.aug = aug
+        self.aug = args.data_aug
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
         self.data = []
         # Load data
-        self.data = load_data(input_data, input_list, validate, args)
+        self.data = load_data(args.data, args.train_list, validate, args)
 
     def __len__(self):
         return len(self.data)
@@ -276,18 +298,20 @@ class FaceBboxData(torch.utils.data.Dataset):
 
 
 class VertGeomData(torch.utils.data.Dataset):
-    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+    def __init__(self, args, validate=False):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
         self.max_num_edge = args.max_num_edge
         self.max_vert = args.max_vert
         self.max_vertFace = args.max_vertFace
         self.bbox_scaled = args.bbox_scaled
-        self.aug = aug
+        self.aug = args.data_aug
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
         self.data = []
 
         # Load data
-        self.data = load_data(input_data, input_list, validate, args)
+        self.data = load_data(args.data, args.train_list, validate, args)
 
     def __len__(self):
         return len(self.data)
@@ -341,21 +365,25 @@ class VertGeomData(torch.utils.data.Dataset):
                 torch.FloatTensor(vert_geom),       # max_vertices*3
                 torch.from_numpy(vv_adj),           # max_vertices*max_vertices
                 torch.from_numpy(mask),             # 1
+                torch.FloatTensor(vertFace_bbox),   # nv*vf*6
+                torch.from_numpy(vertFace_mask),    # nv*1
             )
 
 
 class EdgeGeomData(torch.utils.data.Dataset):
     """ Edge Feature Dataloader """
 
-    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+    def __init__(self, args, validate=False):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
         self.max_num_edge = args.max_num_edge
         self.bbox_scaled = args.bbox_scaled
-        self.aug = aug
+        self.aug = args.data_aug
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
         self.data = []
         # Load data
-        self.data = load_data(input_data, input_list, validate, args)
+        self.data = load_data(args.data, args.train_list, validate, args)
 
     def __len__(self):
         return len(self.data)
@@ -416,31 +444,17 @@ class EdgeGeomData(torch.utils.data.Dataset):
 
 
 class FaceGeomData(torch.utils.data.Dataset):
-    def __init__(self, input_data, input_list, validate=False, aug=False, args=None):
+    def __init__(self, args, validate=False):
         self.max_face = args.max_face
         self.max_edge = args.max_edge
         self.bbox_scaled = args.bbox_scaled
-        self.aug = aug
+        self.aug = args.data_aug
+        self.use_cf = args.use_cf
+        self.use_pc = args.use_pc
+
         self.data = []
-        self.edge_classes = args.edge_classes
         # Load data
-        self.data = load_data(input_data, input_list, validate, args)
-
-    @staticmethod
-    def shuffle_ctrs(face_ctrs, shuffle_prob=0.5):
-        new_face_ctrs = []
-        for ctrs in face_ctrs:                      # 16*3
-            if random.random() < shuffle_prob:
-                ctrs = ctrs.reshape(4, 4, 3)        # 4*4*3
-                if random.random() < 0.5:
-                    ctrs = np.swapaxes(ctrs, 0, 1)
-                if random.random() < 0.5:
-                    ctrs = ctrs[::-1]
-                if random.random() < 0.5:
-                    ctrs = ctrs[:, ::-1, :]
-            new_face_ctrs.append(ctrs.reshape(-1, 3))
-
-        return np.stack(new_face_ctrs)              # nf*16*3
+        self.data = load_data(args.data, args.train_list, validate, args)
 
     def __len__(self):
         return len(self.data)
@@ -464,8 +478,6 @@ class FaceGeomData(torch.utils.data.Dataset):
             data['faceEdge_adj'],                      # [[e1, e2, ...], ...]
             data['edgeVert_adj']                       # ne*2
         )
-
-        # face_ctrs = self.shuffle_ctrs(face_ctrs).reshape(-1, 48)  # nf*48
 
         # Increase value range
         face_bbox = sort_bbox_multi(face_bbox)
@@ -516,3 +528,7 @@ class FaceGeomData(torch.utils.data.Dataset):
                 torch.from_numpy(faceVert_mask),       # max_faces*1
                 torch.from_numpy(faceEdge_mask),       # max_faces*1 un-cond deepcad/abc
             )
+
+
+if __name__ == '__main__':
+    compute_dataset_info(name='deepcad')

@@ -258,26 +258,27 @@ class EdgeVaeTrainer:
 
 
 class FaceBboxTrainer:
-    def __init__(self, args, train_dataset, val_dataset, dataset_info):
+    def __init__(self, args, train_dataset, val_dataset):
         # Initialize model and load to gpu
         self.iters = 0
         self.epoch = 0
         self.save_dir = args.save_dir
-        self.use_cf = args.cf
+        self.use_cf = args.use_cf
+        self.aug = args.data_aug
+        self.use_pc = args.use_pc
         self.z_scaled = args.z_scaled
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.edge_classes = args.edge_classes
 
         # Initialize network
-        hidden_mlp_dims = {'x': 256}
-        hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-        model = FaceBboxTransformer(n_layers=8,
-                                    hidden_mlp_dims=hidden_mlp_dims,
-                                    hidden_dims=hidden_dims,
+        model = FaceBboxTransformer(n_layers=args.FaceBboxModel['n_layers'],
+                                    hidden_mlp_dims=args.FaceBboxModel['hidden_mlp_dims'],
+                                    hidden_dims=args.FaceBboxModel['hidden_dims'],
                                     edge_classes=self.edge_classes,
-                                    act_fn_in=nn.ReLU(), act_fn_out=nn.ReLU(),
+                                    act_fn_in=nn.ReLU(),
+                                    act_fn_out=nn.ReLU(),
                                     use_cf=self.use_cf)
-        model = nn.DataParallel(model)    # distributed training
+        model = nn.DataParallel(model)                      # distributed training
         self.model = model.to(self.device).train()
 
         # Initialize diffusion scheduler
@@ -437,23 +438,24 @@ class FaceBboxTrainer:
 
 
 class VertGeomTrainer:
-    def __init__(self, args, train_dataset, val_dataset, dataset_info):
+    def __init__(self, args, train_dataset, val_dataset):
         # Initialize model and load to gpu
         self.iters = 0
         self.epoch = 0
         self.save_dir = args.save_dir
-        self.use_cf = args.cf
+        self.use_cf = args.use_cf
+        self.aug = args.data_aug
+        self.use_pc = args.use_pc
         self.z_scaled = args.z_scaled
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.edge_classes = args.edge_classes
 
         # Initialize network
-        hidden_mlp_dims = {'x': 256}
-        hidden_dims = {'dx': 512, 'de': 256, 'n_head': 8, 'dim_ffX': 512}
-        model = VertGeomTransformer(n_layers=8,
-                                    hidden_mlp_dims=hidden_mlp_dims,
-                                    hidden_dims=hidden_dims,
-                                    act_fn_in=nn.ReLU(), act_fn_out=nn.ReLU(),
+        model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layers'],
+                                    hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
+                                    hidden_dims=args.VertGeomModel['hidden_dims'],
+                                    act_fn_in=nn.ReLU(),
+                                    act_fn_out=nn.ReLU(),
                                     use_cf=self.use_cf)
         model = nn.DataParallel(model)    # distributed training
         self.model = model.to(self.device).train()
@@ -506,7 +508,7 @@ class VertGeomTrainer:
                     # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1
                     vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask, class_label = data
                 else:
-                    vert_geom, vv_adj, vert_mask = data
+                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask = data
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
@@ -574,7 +576,7 @@ class VertGeomTrainer:
                     # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1
                     vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask, class_label = data
                 else:
-                    vert_geom, vv_adj, vert_mask = data
+                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask = data
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
@@ -625,18 +627,24 @@ class VertGeomTrainer:
 
 class EdgeGeomTrainer:
 
-    def __init__(self, args, train_dataset, val_dataset, dataset_info):
+    def __init__(self, args, train_dataset, val_dataset):
         # Initialize model and load to gpu
         self.iters = 0
         self.epoch = 0
         self.save_dir = args.save_dir
-        self.use_cf = args.cf
+        self.use_cf = args.use_cf
+        self.aug = args.data_aug
+        self.use_pc = args.use_pc
         self.z_scaled = args.z_scaled
         self.max_edge = args.max_edge
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Initialize network
-        model = EdgeGeomTransformer(n_layers=8, edge_geom_dim=12, use_cf=self.use_cf)
+        model = EdgeGeomTransformer(n_layers=args.EdgeGeomModel['n_layers'],
+                                    edge_geom_dim=args.EdgeGeomModel['edge_geom_dim'],
+                                    d_model=args.EdgeGeomModel['d_model'],
+                                    nhead=args.EdgeGeomModel['nhead'],
+                                    use_cf=self.use_cf)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
 
@@ -809,12 +817,14 @@ class EdgeGeomTrainer:
 
 
 class FaceGeomTrainer:
-    def __init__(self, args, train_dataset, val_dataset, dataset_info):
+    def __init__(self, args, train_dataset, val_dataset):
         # Initialize model and load to gpu
         self.iters = 0
         self.epoch = 0
         self.save_dir = args.save_dir
-        self.use_cf = args.cf
+        self.use_cf = args.use_cf
+        self.aug = args.data_aug
+        self.use_pc = args.use_pc
         self.z_scaled = args.z_scaled
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.edge_classes = args.edge_classes
