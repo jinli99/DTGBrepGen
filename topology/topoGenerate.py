@@ -8,7 +8,7 @@ from typing import List
 from collections import defaultdict
 from tqdm import tqdm
 from model import FaceEdgeModel, EdgeVertModel
-from utils import pad_zero, load_data_with_prefix
+from utils import pad_zero, load_data_with_prefix, calculate_y
 import yaml
 from argparse import Namespace
 
@@ -388,7 +388,9 @@ def test_valid(args):
             data = pickle.load(f)
 
         # save encoder information
-        edgeFace_adj = torch.from_numpy(data['edgeFace_adj']).unsqueeze(0).to(device)
+        edgeFace_adj = torch.from_numpy(data['edgeFace_adj']).to(device)
+        share_id = calculate_y(edgeFace_adj)
+        edgeFace_adj = edgeFace_adj.unsqueeze(0)
 
         if args.use_cf:
             class_label = torch.LongTensor([text2int[data['name'].split('_')[0]]]).to(device).reshape(-1, 1)
@@ -396,6 +398,7 @@ def test_valid(args):
             class_label = None
         model.save_cache(edgeFace_adj=edgeFace_adj,
                          edge_mask=torch.ones((edgeFace_adj.shape[0], edgeFace_adj.shape[1]), device=device, dtype=torch.bool),
+                         share_id=share_id,
                          class_label=class_label)
         for try_time in range(10):
             generator = SeqGenerator(data['edgeFace_adj'])
@@ -467,10 +470,12 @@ def topo_sample(args):
                 edge_indices = torch.triu(adj, diagonal=1).nonzero(as_tuple=False)
                 num_edges = adj[edge_indices[:, 0], edge_indices[:, 1]]
                 edgeFace_adj = edge_indices.repeat_interleave(num_edges, dim=0)                        # ne*2
+                share_id = calculate_y(edgeFace_adj)
 
                 # save encoder information
                 edgeVert_model.save_cache(edgeFace_adj=edgeFace_adj.unsqueeze(0),
                                           edge_mask=torch.ones((1, edgeFace_adj.shape[0]), device=device, dtype=torch.bool),
+                                          share_id=share_id,
                                           class_label=class_label[[i]] if class_label is not None else None)
                 for try_time in range(10):
                     generator = SeqGenerator(edgeFace_adj.cpu().numpy())
@@ -488,16 +493,16 @@ def topo_sample(args):
 
 if __name__ == '__main__':
 
-    name = 'furniture'
+    name = 'deepcad'
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
 
     # ====================Test EdgeVert Model=================================
-    config['test_path'] = os.path.join('data_process/TopoDatasets', name, 'test')
-    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_3000.pt')
-    test_valid(args=Namespace(**config))
+    # config['test_path'] = os.path.join('data_process/TopoDatasets', name, 'test')
+    # config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_100.pt')
+    # test_valid(args=Namespace(**config))
 
     # ====================Test Topology Model=================================
-    # config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_2000.pt')
-    # config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_3000.pt')
-    # topo_sample(args=Namespace(**config))
+    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_600.pt')
+    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_100.pt')
+    topo_sample(args=Namespace(**config))

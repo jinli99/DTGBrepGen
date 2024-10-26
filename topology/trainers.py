@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from model import EdgeVertModel, FaceEdgeModel
+from utils import make_mask
 
 
 class FaceEdgeTrainer:
@@ -206,17 +207,20 @@ class EdgeVertTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label = data    # b*ne*2, b*ne, b*ns, b*ns, b*1
+                    edgeFace_adj, edge_mask, share_id, topo_seq, seq_mask, class_label = data    # b*ne*2, b*1, b*ne, b*ns, b*1, b*1
                 else:
-                    edgeFace_adj, edge_mask, topo_seq, seq_mask = data                 # b*ne*2, b*ne, b*ns, b*ns
+                    edgeFace_adj, edge_mask, share_id, topo_seq, seq_mask = data                 # b*ne*2, b*1, b*ne, b*ns, b*1
                     class_label = None
-                ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
-                ns = torch.nonzero(seq_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
+                ne = edge_mask.max()
+                ns = seq_mask.max()
                 edgeFace_adj = edgeFace_adj[:, :ne, :]
-                edge_mask = edge_mask[:, :ne]
+                share_id = share_id[:, :ne]
                 topo_seq = topo_seq[:, :ns]
-                seq_mask = seq_mask[:, :ns]
-                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label)       # b*ns*(ne+2)
+
+                edge_mask = make_mask(edge_mask, ne)      # b*ne
+                seq_mask = make_mask(seq_mask, ns)        # b*ns
+
+                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, share_id, class_label)       # b*ns*(ne+2)
 
                 # Zero gradient
                 self.optimizer.zero_grad()
@@ -254,17 +258,20 @@ class EdgeVertTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label = data    # b*ne*2, b*ne, b*ns, b*ns, b*1
+                    edgeFace_adj, edge_mask, share_id, topo_seq, seq_mask, class_label = data    # b*ne*2, b*1, b*ne, b*ns, b*1, b*1
                 else:
-                    edgeFace_adj, edge_mask, topo_seq, seq_mask = data                 # b*ne*2, b*ne, b*ns, b*ns
+                    edgeFace_adj, edge_mask, share_id, topo_seq, seq_mask = data                 # b*ne*2, b*1, b*ne, b*ns, b*1
                     class_label = None
-                ne = torch.nonzero(edge_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
-                ns = torch.nonzero(seq_mask.int().sum(0), as_tuple=True)[0][-1].cpu().item() + 1
+                ne = edge_mask.max()
+                ns = seq_mask.max()
                 edgeFace_adj = edgeFace_adj[:, :ne, :]
-                edge_mask = edge_mask[:, :ne]
+                share_id = share_id[:, :ne]
                 topo_seq = topo_seq[:, :ns]
-                seq_mask = seq_mask[:, :ns]
-                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label)    # b*ns*(ne+2)
+
+                edge_mask = make_mask(edge_mask, ne)      # b*ne
+                seq_mask = make_mask(seq_mask, ns)        # b*ns
+
+                logits = self.model(edgeFace_adj, edge_mask, topo_seq, seq_mask, share_id, class_label)       # b*ns*(ne+2)
 
                 # Loss
                 loss = self.train_loss(logits, topo_seq, seq_mask)

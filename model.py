@@ -24,6 +24,8 @@ from torch_geometric.nn import GATConv
 from utils import xe_mask, assert_correctly_masked, masked_softmax, pad_and_stack
 from topology.transfer import edge_vert_trans
 
+from utils import make_mask
+
 
 class UNetMidBlock1D(nn.Module):
     def __init__(self, mid_channels: int, in_channels: int, out_channels: Optional[int] = None):
@@ -1991,6 +1993,7 @@ class FaceEdgeModel(nn.Module):
         self.num_categories = num_categories
         self.GATmodel = GAT(num_features=1).to(device)
         self.GAToptimizer = torch.optim.Adam(self.GATmodel.parameters(), lr=0.01)
+        self.mlp = MLP(input_dim=self.seq_len * 2, hidden_dim=256, output_dim=self.seq_len * self.d_model).to(device)
 
         self.embedding = nn.Embedding(num_categories + 1, d_model)
         self.positional_encoding = self.create_positional_encoding()
@@ -2098,7 +2101,6 @@ class FaceEdgeModel(nn.Module):
 
         edge_features = torch.cat([node_i_features, node_j_features], dim=-1)
 
-        self.mlp = MLP(input_dim=seq_len * 2, hidden_dim=256, output_dim=seq_len * self.d_model).to(device)
         edge_features = self.mlp(edge_features)
         edge_features = edge_features.view(batch_size, seq_len, self.d_model)
         layer_norm = torch.nn.LayerNorm(self.d_model).to(edge_features.device)
@@ -2113,16 +2115,16 @@ class FaceEdgeModel(nn.Module):
         """
 
         fef_pos_encoding = self.create_positional_encode_fef(src).to(src.device)
-        node_encode = self.create_GAT_encode(src)
-        GAT_encode = self.compute_GAT_encode(node_encode)
-        src = self.embedding(src) + self.positional_encoding + GAT_encode
+        # node_encode = self.create_GAT_encode(src)
+        # GAT_encode = self.compute_GAT_encode(node_encode)
+        src = self.embedding(src) + self.positional_encoding #+ GAT_encode
 
         if self.use_cf:
             src += self.class_embed(class_label)
 
         # src = self.embedding(src) + self.positional_encoding
         # src shape after embedding: [batch_size, seq_len, d_model]
-        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)    # [batch_size, seq_len, d_model]
+        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)     # [batch_size, seq_len, d_model]
         mu = self.fc_mu(memory.mean(dim=1))                                                   # [batch_size, d_model]
         logvar = self.fc_logvar(memory.mean(dim=1))                                           # [batch_size, d_model]
         return mu, logvar
@@ -2170,13 +2172,13 @@ class FaceEdgeModel(nn.Module):
         """
 
         src = torch.cat([torch.full((src.shape[0], 1), self.num_categories,
-                                    dtype=src.dtype, device=src.device), src], dim=1)  # b*(seq_len+1)
+                                    dtype=src.dtype, device=src.device), src], dim=1)       # b*(seq_len+1)
         mu, logvar = self.encode(src[:, 1:], class_label)
         z = self.reparameterize(mu, logvar)
         return self.decode(z, src[:, :-1], class_label), mu, logvar
 
     def sample(self, num_samples, class_label=None):
-        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)  # [64,128]
+        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)       # [64,128]
         start_token = torch.ones(num_samples, 1).long().to(z.device) * self.num_categories  # [64,1]
         generated = start_token
 
@@ -2218,7 +2220,7 @@ class GraphFeatModel(nn.Module):
 
 
 class TopoEncoder(nn.Module):
-    def __init__(self, input_dim=16, d_model=256, num_head=8, dim_feedforward=1024, dropout=0.1, n_layers=4):
+    def __init__(self, input_dim=16, d_model=256, num_head=4, dim_feedforward=256, dropout=0.1, n_layers=4):
         super().__init__()
 
         self.embed_layer = nn.Linear(input_dim, d_model)
@@ -2245,7 +2247,7 @@ class TopoEncoder(nn.Module):
         Returns:
             A tensor of shape [batch_size, ne+2, d_model]."""
 
-        edge_embed = self.embed_layer(edge_embed)         # b*(ne+2)*d_model
+        # edge_embed = self.embed_layer(edge_embed)         # b*(ne+2)*d_model
 
         if conds is not None:
             edge_embed += conds                           # b*(ne+2)*d_model
@@ -2259,7 +2261,7 @@ class TopoEncoder(nn.Module):
 
 
 class TopoDecoder(nn.Module):
-    def __init__(self, max_seq_length, d_model=256, num_head=4, dim_feedforward=1024, dropout=0.1, n_layers=4):
+    def __init__(self, max_seq_length, d_model=256, num_head=4, dim_feedforward=256, dropout=0.1, n_layers=4):
         super(TopoDecoder, self).__init__()
 
         self.pos_embedding = nn.Embedding(max_seq_length, d_model)
@@ -2332,9 +2334,10 @@ class EdgeVertModel(nn.Module):
                  edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000, n_layers=4, use_cf=False):
         super(EdgeVertModel, self).__init__()
 
-        self.feat_extractor = GraphFeatModel(input_face_features=input_face_features,
-                                             num_face_features=emb_features)
-        self.face_nEdge_embedding = nn.Embedding(max_edge, input_face_features)
+        # self.feat_extractor = GraphFeatModel(input_face_features=input_face_features,
+        #                                      num_face_features=emb_features)
+        # self.face_nEdge_embedding = nn.Embedding(max_edge, emb_features)
+        emb_features = d_model
         self.face_idx_embedding = nn.Embedding(max_face, emb_features)
         self.edge_idx_embedding = nn.Embedding(max_num_edge, emb_features)
         self.edge_classes = edge_classes
@@ -2370,56 +2373,70 @@ class EdgeVertModel(nn.Module):
 
         return edge_index    # Ne*2
 
-    def graph_feat_extra(self, edgeFace_adj, edge_mask):
+    def graph_feat_extra(self, edgeFace_adj, edge_mask, share_id):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
-            edge_mask: A tensor of shape [batch_size, ne]."""
+            edge_mask: A tensor of shape [batch_size, ne].
+            share_id: A tensor of shape [batch_size, ne].
+        """
 
-        # compute face feature
-        edge_index = self.get_edge_index(edgeFace_adj, edge_mask)    # Ne*2
-        assert (edge_index[:, 0] - edge_index[:, 1]).abs().min() > 0
-        face_nEdges = torch.bincount(edge_index.flatten(), minlength=edge_index.max().item()+1)
-        edge_index_unique, edge_index_num = torch.unique(
-            torch.sort(edge_index, dim=1).values, dim=0, return_counts=True)
-        assert face_nEdges.max() <= self.max_edge
-        face_embed = self.face_nEdge_embedding(face_nEdges-1)                           # nf*input_face_features
-        assert edge_index_num.max() < self.edge_classes
-        face_feat = self.feat_extractor(face_embed, edge_index_unique.transpose(0, 1), edge_index_num/self.edge_classes)
+        batch_size, ne, _ = edgeFace_adj.shape
+        device = edgeFace_adj.device
 
-        # assign edge feature
-        edge_num_per = edge_mask.sum(1)    # b
-        face_num_per = torch.max(edgeFace_adj.flatten(1, 2), dim=1)[0] + 1   # b
-        face_feat += self.face_idx_embedding(torch.cat(
-            [torch.arange(i.item(), device=edgeFace_adj.device) for i in face_num_per]))
-        edge_feat = face_feat[edge_index].mean(1)    # Ne*embed_features
+        edge_feat = self.face_idx_embedding(edgeFace_adj).mean(-2)       # b*ne*embed_features
+        edge_feat += self.fef_embedding(share_id)                        # b*ne*embed_features
 
-        edge_feat += self.fef_embedding(torch.cat(
-            [torch.arange(i.item()) for i in edge_index_num]).to(edge_index_num.device))
+        edge_embed = torch.zeros((batch_size, edge_mask.shape[1] * 2, edge_feat.size(-1)),
+                                 dtype=edge_feat.dtype, device=edge_feat.device)  # b*ne*m
+        edge_embed[:, 0::2, :] = (edge_feat+self.even_embed)*edge_mask.unsqueeze(-1)
+        edge_embed[:, 1::2, :] = (edge_feat+self.odd_embed)*edge_mask.unsqueeze(-1)
+        edge_num_per = edge_mask.sum(1)                                  # b
+        edge_num_per *= 2                                                # b
 
-        # edge_feat += self.edge_idx_embedding(torch.cat(
-        #     [torch.arange(i.item(), device=edgeFace_adj.device) for i in edge_num_per]))
+        edge_mask = make_mask(mask=edge_num_per.unsqueeze(-1), n=edge_embed.shape[1])
 
-        edge_feat = torch.cat(
-            (edge_feat+self.even_embed.unsqueeze(0), edge_feat+self.odd_embed.unsqueeze(0)), dim=-1).reshape(
-            2 * edge_feat.size(0), -1)       # (2*Ne)*embed_features
+        # # compute face feature
+        # edge_index = self.get_edge_index(edgeFace_adj, edge_mask)    # Ne*2
+        # assert (edge_index[:, 0] - edge_index[:, 1]).abs().min() > 0
+        # edge_index_unique, edge_index_num = torch.unique(
+        #     torch.sort(edge_index, dim=1).values, dim=0, return_counts=True)
+        #
+        # assert edge_index_num.max() < self.edge_classes
+        #
+        # # assign edge feature
+        # edge_num_per = edge_mask.sum(1)                                      # b
+        # face_num_per = torch.max(edgeFace_adj.flatten(1, 2), dim=1)[0] + 1   # b
+        # face_feat = self.face_idx_embedding(torch.cat(
+        #     [torch.arange(i.item(), device=edgeFace_adj.device) for i in face_num_per]))
+        # edge_feat = face_feat[edge_index].mean(1)    # Ne*embed_features
+        #
+        # edge_feat += self.fef_embedding(torch.cat(
+        #     [torch.arange(i.item()) for i in edge_index_num]).to(edge_index_num.device))
+        #
+        # edge_feat = torch.cat(
+        #     (edge_feat+self.even_embed.unsqueeze(0), edge_feat+self.odd_embed.unsqueeze(0)), dim=-1).reshape(
+        #     2 * edge_feat.size(0), -1)               # (2*Ne)*embed_features
+        #
+        # # gather edges to batch
+        # edge_num_per *= 2
+        # edge_embed = torch.zeros((batch_size, edge_mask.shape[1]*2, edge_feat.size(1)),
+        #                          dtype=edge_feat.dtype, device=edge_feat.device)                    # b*ne*m
+        # edge_mask = torch.zeros((batch_size, edge_mask.shape[1]*2),
+        #                         dtype=torch.bool, device=edge_feat.device)                          # b*ne
+        #
+        # start_indices = torch.cat([torch.zeros(1, device=edge_num_per.device, dtype=torch.long),
+        #                            edge_num_per.cumsum(0)[:-1]], dim=0)
+        # max_edges = edge_mask.shape[1]
+        # range_tensor = torch.arange(max_edges, device=edge_feat.device)[None, :]
+        # valid_mask = range_tensor < edge_num_per[:, None]
+        # edge_mask[valid_mask] = True
+        # indices_expand = range_tensor + start_indices[:, None]
+        # edge_embed[valid_mask] = edge_feat[indices_expand[valid_mask]]
 
-        # gather edges to batch
-        edge_num_per *= 2
-        batch_size = edge_num_per.size(0)
-        edge_embed = torch.zeros((batch_size, edge_mask.shape[1]*2, edge_feat.size(1)),
-                                 dtype=edge_feat.dtype, device=edge_feat.device)                    # b*ne*m
-        edge_mask = torch.zeros((batch_size, edge_mask.shape[1]*2),
-                                dtype=torch.bool, device=edge_feat.device)                          # b*ne
-        start_idx = 0
-        for i in range(batch_size):
-            num_edges = edge_num_per[i].item()
-            end_idx = start_idx + num_edges
+        temp = edge_embed.abs().sum(-1) > 0
+        assert torch.equal(temp.sum(-1), edge_num_per)
 
-            edge_embed[i, :num_edges, :] = edge_feat[start_idx:end_idx, :]
-            edge_mask[i, :num_edges] = True
-
-            start_idx = end_idx
         return edge_embed, edge_mask, edge_num_per
 
     def encoding(self, edge_embed, edge_mask, class_label):
@@ -2438,19 +2455,20 @@ class EdgeVertModel(nn.Module):
         edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask, conds=class_embeddings)   # b*(ne+2)*d_model
         return edge_embed, edge_mask
 
-    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask, class_label):
+    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask, share_id, class_label):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
             edge_mask: A tensor of shape [batch_size, ne].
             topo_seq: A tensor of shape [batch_size, ns].
             seq_mask: A tensor of shape [batch_size, ns].
+            share_id: A tensor of shape [batch_size, ne].
             class_label: A tensor of shape [batch_size, 1].
         Returns:
             A tensor with shape [batch_size, ns, ne+2]."""
 
         # ====================================Extract graph features================================================
-        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
+        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask, share_id)
         assert torch.all(edge_mask.sum(-1) // 2 - 1 == topo_seq.max(-1)[0] // 2)
 
         # =====================================Transformer Encoding=================================================
@@ -2479,16 +2497,17 @@ class EdgeVertModel(nn.Module):
 
         return logits
 
-    def save_cache(self, edgeFace_adj, edge_mask, class_label):
+    def save_cache(self, edgeFace_adj, edge_mask, share_id, class_label):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
             edge_mask: A tensor of shape [batch_size, ne].
+            share_id: A tensor of shape [batch_size, ne].
             class_label: A tensor of shape [batch_size, 1].
         """
 
         # ====================================Extract graph features================================================
-        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask)
+        edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask, share_id)
 
         # =====================================Transformer Encoding=================================================
         edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label)

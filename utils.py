@@ -87,6 +87,35 @@ def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
     return True
 
 
+def calculate_y(x):
+    # x: [ne, 2]
+
+    if isinstance(x, np.ndarray):
+        x = np.sort(x, axis=1)
+        ne = len(x)
+        y = np.zeros(ne, dtype=int)
+        for i in range(1, ne):
+            if np.array_equal(x[i], x[i - 1]):
+                y[i] = y[i - 1] + 1
+            else:
+                y[i] = 0
+        return y
+
+    elif isinstance(x, torch.Tensor):
+        x = torch.sort(x, dim=1).values
+        ne = x.size(0)
+        y = torch.zeros(ne, dtype=torch.int64, device=x.device)
+        for i in range(1, ne):
+            if torch.equal(x[i], x[i - 1]):
+                y[i] = y[i - 1] + 1
+            else:
+                y[i] = 0
+        return y
+
+    else:
+        raise TypeError("Input must be a numpy array or a torch tensor")
+
+
 def pad_and_stack(inputs, max_n=None):
 
     if isinstance(inputs[0], np.ndarray):

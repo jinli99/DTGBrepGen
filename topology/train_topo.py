@@ -10,9 +10,9 @@ def get_args_topo():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default='deepcad',
                         choices=['furniture', 'deepcad', 'abc'])
-    parser.add_argument('--batch_size', type=int, default=512, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
     parser.add_argument("--option", type=str, choices=['faceEdge', 'edgeVert'], default='edgeVert')
-    parser.add_argument('--train_epochs', type=int, default=2000, help='number of epochs to train for')
+    parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
     parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
@@ -55,7 +55,7 @@ def main():
     print('Start training...')
 
     # Initialize wandb
-    # os.environ["WANDB_MODE"] = "offline"
+    os.environ["WANDB_MODE"] = "offline"
     wandb.init(project='BrepGDM', dir=args.save_dir, name=args.env)
 
     # Main training loop

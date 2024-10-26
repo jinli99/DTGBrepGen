@@ -108,7 +108,7 @@ if __name__ == '__main__':
     name = 'deepcad'
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
-    config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_500.pt')
+    config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
     config['test_path'] = os.path.join('inference', name+'_test.pkl')
     config['save_folder'] = os.path.join('samples', name)
 

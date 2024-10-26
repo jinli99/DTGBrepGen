@@ -4,7 +4,7 @@ import copy
 import torch
 import numpy as np
 from tqdm import tqdm
-from utils import check_step_ok, pad_zero, load_data_with_prefix
+from utils import check_step_ok, pad_zero, load_data_with_prefix, calculate_y
 from itertools import chain
 
 
@@ -226,7 +226,7 @@ class EdgeVertDataset(torch.utils.data.Dataset):
         #         max_num_edge = max(max_num_edge, data['edgeFace_adj'].shape[0])
         self.max_seq_length = args.max_seq_length
         self.max_num_edge_topo = args.max_num_edge_topo
-        self.aug = args.data_aug
+        self.aug = True
         self.use_cf = args.use_cf
         self.use_pc = args.use_pc
 
@@ -292,22 +292,29 @@ class EdgeVertDataset(torch.utils.data.Dataset):
         assert edgeFace_adj.shape[0] <= self.max_num_edge_topo
         edgeFace_adj, edge_mask = pad_zero(edgeFace_adj, max_len=self.max_num_edge_topo)   # max_num_edge*2, max_num_edge
 
+        share_id = calculate_y(edgeFace_adj) * edge_mask
+
         topo_seq = np.expand_dims(np.array(list(chain.from_iterable(sublist + [-2] for sublist in topo_seq))), axis=-1)
         topo_seq, seq_mask = pad_zero(topo_seq, max_len=self.max_seq_length)        # max_seq_length*1, max_seq_length
+
+        edge_mask = edge_mask.sum(keepdims=True)               # 1
+        seq_mask = seq_mask.sum(keepdims=True)                 # 1
 
         if self.use_cf:
             data_class = text2int[data['name'].split('_')[0]] + 1
             return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
-                    torch.from_numpy(edge_mask),               # max_num_edge
+                    torch.from_numpy(edge_mask),               # 1
+                    torch.from_numpy(share_id),                # max_num_edge
                     torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
-                    torch.from_numpy(seq_mask).squeeze(-1),    # max_seq_length
+                    torch.from_numpy(seq_mask),                # 1
                     torch.LongTensor([data_class])             # 1
                     )
         else:
             return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
-                    torch.from_numpy(edge_mask),               # max_num_edge
+                    torch.from_numpy(edge_mask),               # 1
+                    torch.from_numpy(share_id),                # max_num_edge
                     torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
-                    torch.from_numpy(seq_mask).squeeze(-1)     # max_seq_length
+                    torch.from_numpy(seq_mask),                # 1
                     )
 
 
