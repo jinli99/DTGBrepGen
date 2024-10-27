@@ -505,22 +505,24 @@ class VertGeomTrainer:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1
-                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask, class_label = data
+                    # b*nv*3, b*1, b*nv*vf*6, b*nv*1, b*ne*2, b*1, b*1
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label = data
                 else:
-                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask = data
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, = data
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
+                ne = edge_mask.max()
                 vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
-                vv_adj = vv_adj[:, :nv, :nv]                                  # b*nv*nv2
                 vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
                 vert_mask = make_mask(vert_mask, nv)                          # b*nv
                 vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
+                edgeVert_adj = edgeVert_adj[:, :ne, :]                        # b*ne*2
 
-                x_0, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)    # b*nv*3, b*nv*nv*1
-                e = e.squeeze(-1)                                                             # b*nv*nv
+                edge_mask = make_mask(edge_mask, ne)                          # b*ne
+
+                x_0, _ = xe_mask(x=vert_geom, node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
 
                 self.optimizer.zero_grad()  # zero gradient
 
@@ -530,8 +532,8 @@ class VertGeomTrainer:
                 noise = torch.randn(x_0.shape).to(self.device)
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
-                # Predict start
-                pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))   # b*nv*3
+                pred_noise = self.model(x_t, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask,
+                                        class_label, t.unsqueeze(-1))  # b*nv*3
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -550,6 +552,7 @@ class VertGeomTrainer:
             # logging
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": vert_mse_loss}, step=self.iters)
+                print("******", vert_mse_loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -573,22 +576,24 @@ class VertGeomTrainer:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
                 if self.use_cf:
-                    # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1
-                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask, class_label = data
+                    # b*nv*3, b*1, b*nv*vf*6, b*nv*1, b*ne*2, b*1, b*1
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label = data
                 else:
-                    vert_geom, vv_adj, vert_mask, vertFace_bbox, vertFace_mask = data
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, = data
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
+                ne = edge_mask.max()
                 vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
-                vv_adj = vv_adj[:, :nv, :nv]                                  # b*nv*nv2
                 vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
                 vert_mask = make_mask(vert_mask, nv)                          # b*nv
                 vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
+                edgeVert_adj = edgeVert_adj[:, :ne, :]                        # b*ne*2
 
-                x_0, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)    # b*nv*3, b*nv*nv*1
-                e = e.squeeze(-1)                                                             # b*nv*nv
+                edge_mask = make_mask(edge_mask, ne)                          # b*ne
+
+                x_0, _ = xe_mask(x=vert_geom, node_mask=vert_mask)            # b*nv*3, b*nv*nv*1
                 total_count += 1
 
                 for idx, step in enumerate([10, 50, 100, 200, 500]):
@@ -600,7 +605,8 @@ class VertGeomTrainer:
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict start
-                    pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))  # b*nv*3
+                    pred_noise = self.model(x_t, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask,
+                                            class_label, t.unsqueeze(-1))  # b*nv*3
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")

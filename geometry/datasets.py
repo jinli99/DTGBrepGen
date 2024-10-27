@@ -337,13 +337,12 @@ class VertGeomData(torch.utils.data.Dataset):
         nv = vert_geom.shape[0]
         assert data['edgeVert_adj'].max() + 1 == nv
 
-        vv_adj = np.zeros((nv, nv), dtype=int)
-        vv_adj[data['edgeVert_adj'][:, 0], data['edgeVert_adj'][:, 1]] = 1
-        vv_adj[data['edgeVert_adj'][:, 1], data['edgeVert_adj'][:, 0]] = 1
+        edgeVert_adj = data['edgeVert_adj']
+        edgeVert_adj, edge_mask = pad_zero(edgeVert_adj, max_len=self.max_num_edge, dim=0)
+        edge_mask = edge_mask.sum(keepdims=True)
 
         vert_geom, mask = pad_zero(vert_geom, max_len=self.max_vert, dim=0)       # max_vertices*3, max_vertices
         mask = mask.sum(keepdims=True)                                            # 1
-        vv_adj, _ = pad_zero(vv_adj, max_len=self.max_vert, dim=1)
 
         vertFace_bbox = [face_bbox[i] for i in vertFace_adj]                      # [vf*6, ...]
         vertFace_bbox, vertFace_mask = pad_and_stack(vertFace_bbox, max_n=self.max_vertFace)      # nv*vf*6, nv*vf
@@ -354,19 +353,21 @@ class VertGeomData(torch.utils.data.Dataset):
         if data_class is not None:
             return (
                 torch.FloatTensor(vert_geom),       # max_vertices*3
-                torch.from_numpy(vv_adj),           # max_vertices*max_vertices
                 torch.from_numpy(mask),             # 1
                 torch.FloatTensor(vertFace_bbox),   # nv*vf*6
                 torch.from_numpy(vertFace_mask),    # nv*1
+                torch.from_numpy(edgeVert_adj),     # ne*2
+                torch.from_numpy(edge_mask),        # 1
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
         else:
             return (
                 torch.FloatTensor(vert_geom),       # max_vertices*3
-                torch.from_numpy(vv_adj),           # max_vertices*max_vertices
                 torch.from_numpy(mask),             # 1
                 torch.FloatTensor(vertFace_bbox),   # nv*vf*6
                 torch.from_numpy(vertFace_mask),    # nv*1
+                torch.from_numpy(edgeVert_adj),     # ne*2
+                torch.from_numpy(edge_mask),        # 1
             )
 
 

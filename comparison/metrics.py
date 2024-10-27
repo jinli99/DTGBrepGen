@@ -104,6 +104,14 @@ def check_brep_validity(step_file_path):
     return int(wire_order_ok and wire_self_intersection_ok and shell_bad_edges_ok and brep_closed_ok)
 
 
+def compute_novelty(source_path, target_path):
+    pass
+
+
+def compute_uniqueness(source_path, target_path):
+    pass
+
+
 def check_mesh_validity(mesh_path):
     mesh = trimesh.load(mesh_path)
 
@@ -171,7 +179,7 @@ class ValidMetric:
 
 def main():
 
-    xx = ValidMetric(input_path='/home/jing/PythonProjects/BrepGDM/samples/furniture/')
+    xx = ValidMetric(input_path='samples/deepcad')
     xx.compute_metric(parallel=True)
 
 

@@ -8,7 +8,7 @@ from diffusers import DDPMScheduler, PNDMScheduler
 from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer, FaceEdgeModel, EdgeVertModel
 from topology.topoGenerate import SeqGenerator
 from topology.transfer import faceVert_from_edgeVert, face_vert_trans, fef_from_faceEdge
-from utils import xe_mask, pad_zero, sort_bbox_multi, generate_random_string, make_mask, pad_and_stack
+from utils import xe_mask, pad_zero, sort_bbox_multi, generate_random_string, make_mask, pad_and_stack, calculate_y
 from OCC.Extend.DataExchange import write_step_file
 from visualization import *
 from brepBuild import Brep2Mesh, sample_bspline_curve, create_bspline_curve, joint_optimize, construct_brep
@@ -64,14 +64,16 @@ def get_topology(batch, faceEdge_model, edgeVert_model, device, labels):
             edge_indices = torch.triu(adj, diagonal=1).nonzero(as_tuple=False)
             num_edges = adj[edge_indices[:, 0], edge_indices[:, 1]]
             ef_adj = edge_indices.repeat_interleave(num_edges, dim=0)                              # ne*2
+            share_id = calculate_y(ef_adj)
 
             # save encoder information
             edgeVert_model.save_cache(edgeFace_adj=ef_adj.unsqueeze(0),
                                       edge_mask=torch.ones((1, ef_adj.shape[0]), device=device, dtype=torch.bool),
+                                      share_id=share_id,
                                       class_label=class_label[[i]] if class_label is not None else None)
             for try_time in range(10):
                 generator = SeqGenerator(ef_adj.cpu().numpy())
-                if generator.generate(edgeVert_model, class_label[[i]]):
+                if generator.generate(edgeVert_model, class_label[[i]] if class_label is not None else None):
                     # print("Construct Brep Topology succeed at time %d!" % try_time)
                     edgeVert_model.clear_cache()
                     valid += 1
@@ -146,6 +148,7 @@ def get_faceBbox(fef_adj, model, pndm_scheduler, ddpm_scheduler, class_label):
                 pred = model(face_bbox,
                              e,
                              face_mask,
+                             class_label,
                              timesteps.expand(face_bbox.shape[0], 1))
             face_bbox = pndm_scheduler.step(pred, t, face_bbox).prev_sample
             face_bbox, _ = xe_mask(x=face_bbox, node_mask=face_mask)
@@ -164,11 +167,107 @@ def get_faceBbox(fef_adj, model, pndm_scheduler, ddpm_scheduler, class_label):
                 pred = model(face_bbox,
                              e,
                              face_mask,
+                             class_label,
                              timesteps.expand(face_bbox.shape[0], 1))
             face_bbox = ddpm_scheduler.step(pred, t, face_bbox).prev_sample
             face_bbox, _ = xe_mask(x=face_bbox, node_mask=face_mask)
 
     return face_bbox, face_mask
+
+
+# def get_vertGeom(face_bbox, vertFace_adj, edgeVert_adj, model, pndm_scheduler, ddpm_scheduler, class_label):
+#     """
+#     Args:
+#         face_bbox: List of tensors, where each tensor has shape [nf, 6], representing face bounding boxes.
+#         vertFace_adj: List of List[List[int]]
+#         edgeVert_adj: List tensors, where each tensor has shape [ne, 2]
+#         model: vertGeom denoising model
+#         pndm_scheduler: pndm sampling
+#         ddpm_scheduler: ddpm sampling
+#         class_label: List with length b
+#     Returns:
+#         edge_geom (torch.Tensor): [b, ne, 2] tensor, sampled edge geometry
+#         edge_mask (torch.Tensor): [b, ne] tensor, edge mask of the sampled edge geometry
+#     """
+#
+#     b = len(face_bbox)
+#     device = face_bbox[0].device
+#     vert_per_num = [len(i) for i in vertFace_adj]
+#     nv = max(vert_per_num)
+#     vv_adj = torch.zeros((b, nv, nv), device=device, dtype=torch.int)
+#     for i in range(b):
+#         indices = edgeVert_adj[i]                              # ne*2
+#         vv_adj[i, indices[:, 0], indices[:, 1]] = 1
+#         vv_adj[i, indices[:, 1], indices[:, 0]] = 1            # nv*nv
+#     vert_mask = make_mask(torch.tensor(vert_per_num, device=device).unsqueeze(-1), nv)   # b*nv
+#
+#     vertFace_bbox = []
+#     vertFace_mask = []
+#     vf = max([max([len(j) for j in i]) for i in vertFace_adj])
+#     for i in range(b):
+#         temp1 = [face_bbox[i][j] for j in vertFace_adj[i]]      # [vf*6, ...]
+#         temp1, temp2 = pad_and_stack(temp1, max_n=vf)           # nv*vf*6, nv*vf
+#         vertFace_bbox.append(temp1)
+#         vertFace_mask.append(temp2)
+#     vertFace_bbox, _ = pad_and_stack(vertFace_bbox)             # b*nv*vf*6
+#     vertFace_mask, _ = pad_and_stack(vertFace_mask)             # b*nv*vf
+#     assert vertFace_mask.shape == (b, nv, vf) and vertFace_bbox.shape == (b, nv, vf, 6)
+#
+#     w = 0.6
+#     if class_label is not None:
+#         class_label = torch.LongTensor(class_label+[text2int['uncond']]*b).to(device).reshape(-1,1)
+#
+#     with torch.no_grad():
+#         vert_geom = torch.randn((b, nv, 3), device=device)      # b*nv*3
+#         vert_geom, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
+#         e = e.squeeze(-1)                                                                 # b*nv*nv
+#         pndm_scheduler.set_timesteps(200)
+#         for t in pndm_scheduler.timesteps[:158]:
+#             timesteps = t.reshape(-1).cuda()
+#             if class_label is not None:
+#                 pred = model(torch.cat([vert_geom, vert_geom], dim=0),
+#                              torch.cat([e, e], dim=0),
+#                              torch.cat([vert_mask, vert_mask], dim=0),
+#                              torch.cat([vertFace_bbox, vertFace_bbox], dim=0),
+#                              torch.cat([vertFace_mask, vertFace_mask], dim=0),
+#                              class_label,
+#                              timesteps.expand(2*vert_geom.shape[0], 1))
+#                 pred = pred[:b] * (1 + w) - pred[b:] * w
+#             else:
+#                 pred = model(vert_geom,
+#                              e,
+#                              vert_mask,
+#                              vertFace_bbox,
+#                              vertFace_mask,
+#                              class_label,
+#                              timesteps.expand(vert_geom.shape[0], 1))
+#             vert_geom = pndm_scheduler.step(pred, t, vert_geom).prev_sample
+#             vert_geom, _ = xe_mask(x=vert_geom, node_mask=vert_mask)
+#
+#         ddpm_scheduler.set_timesteps(1000)
+#         for t in ddpm_scheduler.timesteps[-250:]:
+#             timesteps = t.reshape(-1).cuda()
+#             if class_label is not None:
+#                 pred = model(torch.cat([vert_geom, vert_geom], dim=0),
+#                              torch.cat([e, e], dim=0),
+#                              torch.cat([vert_mask, vert_mask], dim=0),
+#                              torch.cat([vertFace_bbox, vertFace_bbox], dim=0),
+#                              torch.cat([vertFace_mask, vertFace_mask], dim=0),
+#                              class_label,
+#                              timesteps.expand(2*vert_geom.shape[0], 1))
+#                 pred = pred[:b] * (1 + w) - pred[b:] * w
+#             else:
+#                 pred = model(vert_geom,
+#                              e,
+#                              vert_mask,
+#                              vertFace_bbox,
+#                              vertFace_mask,
+#                              class_label,
+#                              timesteps.expand(vert_geom.shape[0], 1))
+#             vert_geom = ddpm_scheduler.step(pred, t, vert_geom).prev_sample
+#             vert_geom, _ = xe_mask(x=vert_geom, node_mask=vert_mask)
+#
+#     return vert_geom, vert_mask
 
 
 def get_vertGeom(face_bbox, vertFace_adj, edgeVert_adj, model, pndm_scheduler, ddpm_scheduler, class_label):
@@ -190,11 +289,6 @@ def get_vertGeom(face_bbox, vertFace_adj, edgeVert_adj, model, pndm_scheduler, d
     device = face_bbox[0].device
     vert_per_num = [len(i) for i in vertFace_adj]
     nv = max(vert_per_num)
-    vv_adj = torch.zeros((b, nv, nv), device=device, dtype=torch.int)
-    for i in range(b):
-        indices = edgeVert_adj[i]                              # ne*2
-        vv_adj[i, indices[:, 0], indices[:, 1]] = 1
-        vv_adj[i, indices[:, 1], indices[:, 0]] = 1            # nv*nv
     vert_mask = make_mask(torch.tensor(vert_per_num, device=device).unsqueeze(-1), nv)   # b*nv
 
     vertFace_bbox = []
@@ -209,32 +303,36 @@ def get_vertGeom(face_bbox, vertFace_adj, edgeVert_adj, model, pndm_scheduler, d
     vertFace_mask, _ = pad_and_stack(vertFace_mask)             # b*nv*vf
     assert vertFace_mask.shape == (b, nv, vf) and vertFace_bbox.shape == (b, nv, vf, 6)
 
+    edgeVert_adj, edge_mask = pad_and_stack(edgeVert_adj)       # b*ne*2, b*ne
+
     w = 0.6
     if class_label is not None:
         class_label = torch.LongTensor(class_label+[text2int['uncond']]*b).to(device).reshape(-1,1)
 
     with torch.no_grad():
-        vert_geom = torch.randn((b, nv, 3), device=device)      # b*nv*3
-        vert_geom, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
-        e = e.squeeze(-1)                                                                 # b*nv*nv
+        vert_geom = torch.randn((b, nv, 3), device=device)        # b*nv*3
+        vert_geom, _ = xe_mask(x=vert_geom, node_mask=vert_mask)  # b*nv*3
         pndm_scheduler.set_timesteps(200)
         for t in pndm_scheduler.timesteps[:158]:
             timesteps = t.reshape(-1).cuda()
             if class_label is not None:
                 pred = model(torch.cat([vert_geom, vert_geom], dim=0),
-                             torch.cat([e, e], dim=0),
                              torch.cat([vert_mask, vert_mask], dim=0),
                              torch.cat([vertFace_bbox, vertFace_bbox], dim=0),
                              torch.cat([vertFace_mask, vertFace_mask], dim=0),
+                             torch.cat([edgeVert_adj, edgeVert_adj], dim=0),
+                             torch.cat([edge_mask, edge_mask], dim=0),
                              class_label,
                              timesteps.expand(2*vert_geom.shape[0], 1))
                 pred = pred[:b] * (1 + w) - pred[b:] * w
             else:
                 pred = model(vert_geom,
-                             e,
                              vert_mask,
                              vertFace_bbox,
                              vertFace_mask,
+                             edgeVert_adj,
+                             edge_mask,
+                             class_label,
                              timesteps.expand(vert_geom.shape[0], 1))
             vert_geom = pndm_scheduler.step(pred, t, vert_geom).prev_sample
             vert_geom, _ = xe_mask(x=vert_geom, node_mask=vert_mask)
@@ -244,19 +342,22 @@ def get_vertGeom(face_bbox, vertFace_adj, edgeVert_adj, model, pndm_scheduler, d
             timesteps = t.reshape(-1).cuda()
             if class_label is not None:
                 pred = model(torch.cat([vert_geom, vert_geom], dim=0),
-                             torch.cat([e, e], dim=0),
                              torch.cat([vert_mask, vert_mask], dim=0),
                              torch.cat([vertFace_bbox, vertFace_bbox], dim=0),
                              torch.cat([vertFace_mask, vertFace_mask], dim=0),
+                             torch.cat([edgeVert_adj, edgeVert_adj], dim=0),
+                             torch.cat([edge_mask, edge_mask], dim=0),
                              class_label,
                              timesteps.expand(2*vert_geom.shape[0], 1))
                 pred = pred[:b] * (1 + w) - pred[b:] * w
             else:
                 pred = model(vert_geom,
-                             e,
                              vert_mask,
                              vertFace_bbox,
                              vertFace_mask,
+                             edgeVert_adj,
+                             edge_mask,
+                             class_label,
                              timesteps.expand(vert_geom.shape[0], 1))
             vert_geom = ddpm_scheduler.step(pred, t, vert_geom).prev_sample
             vert_geom, _ = xe_mask(x=vert_geom, node_mask=vert_mask)
@@ -383,7 +484,7 @@ def main(args):
                                    n_layers=args.FaceEdgeModel['n_layers'],
                                    num_categories=args.edge_classes,
                                    use_cf=args.use_cf)
-    faceEdge_model.load_state_dict(torch.load(args.FaceEdge_path), strict=False)
+    faceEdge_model.load_state_dict(torch.load(args.faceEdge_path), strict=False)
     faceEdge_model = faceEdge_model.to(device).eval()
     edgeVert_model = EdgeVertModel(max_num_edge=args.max_num_edge_topo,
                                    max_seq_length=args.max_seq_length,
@@ -393,7 +494,7 @@ def main(args):
                                    d_model=args.EdgeVertModel['d_model'],
                                    n_layers=args.EdgeVertModel['n_layers'],
                                    use_cf=args.use_cf)
-    edgeVert_model.load_state_dict(torch.load(args.EdgeVert_path), strict=False)
+    edgeVert_model.load_state_dict(torch.load(args.edgeVert_path), strict=False)
     edgeVert_model = edgeVert_model.to(device).eval()
 
     # Initial FaceBboxTransformer
@@ -408,7 +509,7 @@ def main(args):
     FaceBbox_model = FaceBbox_model.to(device).eval()
 
     # Initial VertGeomTransformer
-    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layer'],
+    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layers'],
                                          hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
                                          hidden_dims=args.VertGeomModel['hidden_dims'],
                                          act_fn_in=torch.nn.ReLU(),
@@ -444,12 +545,12 @@ def main(args):
         clip_sample_range=3
     )
 
-    total_sample = 512
-    b_each = 16
+    total_sample = 200
+    b_each = 16 if args.name == 'furniture' else 32
     for i in tqdm(range(0, total_sample, b_each)):
 
         b = min(total_sample, i+b_each)-i
-        if args.cf:
+        if args.use_cf:
             class_label = torch.randint(6, 7, (b,)).tolist()
         else:
             class_label = None
@@ -510,10 +611,11 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
-    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
+    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom_1/epoch_500.pt')
     config['faceBbox_path'] = os.path.join('checkpoints', name, 'geom_faceBbox/epoch_3000.pt')
-    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_2000.pt')
-    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_3000.pt')
+    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_1000.pt')
+    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_1000.pt')
     config['save_folder'] = os.path.join('samples', name)
+    config['name'] = name
 
     main(args=Namespace(**config))

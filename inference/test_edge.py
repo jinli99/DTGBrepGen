@@ -53,16 +53,16 @@ def main(args):
         clip_sample_range=3
     )
 
-    with open(args.test_path, 'rb') as f:
+    with open(os.path.join('inference', args.name+'_test.pkl'), 'rb') as f:
         batch_file = pickle.load(f)
 
     # batch_file = ['couch/partstudio_0122.pkl']
 
-    b_each = 32
+    b_each = 16 if args.name == 'furniture' else 32
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(batch_file[i:i + b_each], device, name)
+        datas = get_topology(batch_file[i:i + b_each], device, args.name)
         face_bbox, edgeVert_adj, faceEdge_adj, edgeFace_adj, vert_geom = (datas["face_bbox"],
                                                                           datas["edgeVert_adj"],
                                                                           datas['faceEdge_adj'],
@@ -109,7 +109,7 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
-    config['test_path'] = os.path.join('inference', name+'_test.pkl')
     config['save_folder'] = os.path.join('samples', name)
+    config['name'] = name
 
     main(args=Namespace(**config))

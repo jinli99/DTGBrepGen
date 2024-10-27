@@ -27,7 +27,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initial VertGeomTransformer
-    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layer'],
+    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layers'],
                                          hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
                                          hidden_dims=args.VertGeomModel['hidden_dims'],
                                          act_fn_in=torch.nn.ReLU(),
@@ -63,16 +63,17 @@ def main(args):
         clip_sample_range=3
     )
 
-    with open('furniture_test.pkl', 'rb') as f:
+    with open(os.path.join('inference', args.name+'_test.pkl'), 'rb') as f:
         batch_file = pickle.load(f)
 
     # batch_file = ['chair/partstudio_partstudio_1242.pkl']
 
-    b_each = 16
+    b_each = 16 if args.name == 'furniture' else 32
+
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(batch_file[i:i + b_each], device)
+        datas = get_topology(batch_file[i:i + b_each], device, args.name)
         face_bbox, edgeVert_adj, faceEdge_adj, edgeFace_adj, vertFace_adj = (datas["face_bbox"],
                                                                              datas["edgeVert_adj"],
                                                                              datas['faceEdge_adj'],
@@ -81,7 +82,7 @@ def main(args):
         b = len(face_bbox)
         face_bbox = [sort_bbox_multi(i)*args.bbox_scaled for i in face_bbox]     # [nf*6, ...]
 
-        if args.cf:
+        if args.use_cf:
             class_label = [text2int[i.split('_')[0]] for i in datas['name']]
         else:
             class_label = None
@@ -124,7 +125,8 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
-    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
+    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom_1/epoch_1500.pt')
     config['save_folder'] = os.path.join('samples', name)
+    config['name'] = name
 
     main(args=Namespace(**config))

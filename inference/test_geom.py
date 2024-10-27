@@ -74,7 +74,7 @@ def get_topology(files, device, dataset_name):
 def main(args):
 
     # dataset_name = 'deepcad'
-    # test_files = get_ok_step(120, mode='test', dataset_name=dataset_name)
+    # test_files = get_ok_step(1200, mode='test', dataset_name=dataset_name)
     # with open(os.path.join('inference', dataset_name+'_test.pkl'), 'wb') as f:
     #     pickle.dump(test_files, f)
     # return
@@ -138,7 +138,8 @@ def main(args):
 
     # batch_file = ['chair/partstudio_partstudio_0104.pkl']
 
-    b_each = 16
+    b_each = 16 if args.name == 'furniture' else 32
+
     for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #

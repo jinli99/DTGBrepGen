@@ -1,6 +1,11 @@
+import os
 import plotly.offline as pyo
 import plotly.graph_objects as go
 import numpy as np
+from OCC.Display.SimpleGui import init_display
+from OCC.Core.STEPControl import STEPControl_Reader
+from utils import load_data_with_prefix
+from OCC.Core.IFSelect import IFSelect_RetDone
 
 
 def draw_bfep(bbox=None, faces=None, edges=None, points=None):
@@ -287,10 +292,52 @@ def draw_ctrs(ctrs):
     pyo.plot(fig)
 
 
+def vis_step(path, num=10):
+    """
+    可视化 path 文件夹下所有 STEP 文件，一次显示 num 个文件。
+
+    参数：
+    - path: str，包含 STEP 文件的文件夹路径
+    - num: int，一次可视化的 STEP 文件数量
+    """
+    # 初始化显示窗口
+    display, start_display, add_menu, add_function_to_menu = init_display()
+
+    # 列出文件夹中的所有 STEP 文件
+    step_files = load_data_with_prefix(path, '.step')
+    # step_files.sort()  # 可选，按字母顺序排序
+
+    # 每次展示 num 个文件
+    for i in range(0, len(step_files), num):
+        # 清除之前的显示
+        display.EraseAll()
+
+        # 获取当前批次的 STEP 文件
+        batch_files = step_files[i:i + num]
+
+        # 加载和显示每个文件
+        for step_file in batch_files:
+            step_reader = STEPControl_Reader()
+            filepath = os.path.join(path, step_file)
+            status = step_reader.ReadFile(filepath)
+
+            if status == 1:
+                print(f"无法读取文件 {step_file}")
+                continue
+
+            step_reader.TransferRoots()
+            shape = step_reader.Shape()
+            display.DisplayShape(shape, update=True)
+
+        # 更新显示窗口
+        display.FitAll()
+        print(f"显示文件 {i + 1} 至 {min(i + num, len(step_files))}")
+
+        # 等待用户关闭窗口
+        start_display()
+
+
 """Visulize Step File"""
-# from OCC.Display.SimpleGui import init_display
-# from OCC.Core.STEPControl import STEPControl_Reader
-# from OCC.Core.IFSelect import IFSelect_RetDone
 #
 # # 初始化显示器
 # display, start_display, add_menu, add_function_to_menu = init_display()
@@ -378,3 +425,10 @@ def draw_ctrs(ctrs):
 # # 销毁窗口
 # vis.destroy_window()
 
+
+def main():
+    pass
+
+
+if __name__ == '__main__':
+    vis_step(path='samples/Transformer_2000')

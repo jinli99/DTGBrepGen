@@ -29,7 +29,7 @@ from OCC.Core.Geom import (Geom_BSplineSurface, Geom_BSplineCurve, Geom_Plane,
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.GCPnts import GCPnts_UniformAbscissa
 from utils import load_data_with_prefix
-from primitive_fitting import process_one_surface
+from inference.primitive_fitting import process_one_surface
 from topology.transfer import face_edge_trans
 
 

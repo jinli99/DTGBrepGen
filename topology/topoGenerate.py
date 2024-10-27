@@ -503,6 +503,6 @@ if __name__ == '__main__':
     # test_valid(args=Namespace(**config))
 
     # ====================Test Topology Model=================================
-    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_600.pt')
-    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_100.pt')
+    config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_1000.pt')
+    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_1000.pt')
     topo_sample(args=Namespace(**config))
