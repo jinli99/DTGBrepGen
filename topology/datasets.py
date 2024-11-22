@@ -62,16 +62,6 @@ def compute_topoSeq(faceEdge_adj, edgeVert_adj):
 
     nv = edgeVert_adj.max() + 1
 
-    # # assign new face idx
-    # sorted_faces = [(sorted(edges), idx) for idx, edges in enumerate(faceEdge_adj)]
-    # sorted_faces.sort(key=lambda x: x[0])
-    # new_face_idx = [x[1] for x in sorted_faces]
-    # face_id_inverse = np.zeros(len(new_face_idx), dtype=int)
-    # for i, idx in enumerate(new_face_idx):
-    #     face_id_inverse[idx] = i
-    # edgeFace_adj = face_id_inverse[edgeFace_adj]
-    # faceEdge_adj = [faceEdge_adj[i] for i in new_face_idx]
-
     topo_seq = []
     loop_end_flag = -1
     vert_set = [set() for _ in range(nv)]
@@ -156,6 +146,11 @@ def create_topo_datasets(data_type='train', option='deepcad'):
                     return 0
         else:
             assert option == 'abc'
+            with open(os.path.join('data_process/GeomDatasets/abc_parsed', path), 'rb') as f:
+                datas = pickle.load(f)
+
+                if not check_step_ok(datas, max_face=50, max_edge=30):
+                    return 0
 
         if option == 'furniture':
             data = {'name': path.replace('/', '_').replace('.pkl', '')}
@@ -196,15 +191,35 @@ def create_topo_datasets(data_type='train', option='deepcad'):
             os.makedirs(os.path.join('data_process/TopoDatasets/deepcad', data_type, path.split('/')[-2]), exist_ok=True)
             with open(os.path.join('data_process/TopoDatasets/deepcad', data_type,  path.split('/')[-2], data['name']+'.pkl'), 'wb') as f:
                 pickle.dump(data, f)
+        else:
+            assert option == 'abc'
+            data = {'name': path.split('/')[-1].replace('.pkl', '')}
+
+            faceEdge_adj, edgeFace_adj, edgeVert_adj, fef_adj = assign_idx(datas['faceEdge_adj'],
+                                                                           datas['edgeFace_adj'],
+                                                                           datas['edgeVert_adj'],
+                                                                           datas['fef_adj'])
+
+            topo_seq = compute_topoSeq(faceEdge_adj, edgeVert_adj)
+
+            data['topo_seq'] = topo_seq
+            data['faceEdge_adj'] = faceEdge_adj
+            data['edgeFace_adj'] = edgeFace_adj
+            data['edgeVert_adj'] = edgeVert_adj
+            data['fef_adj'] = fef_adj
+
+            os.makedirs(os.path.join('data_process/TopoDatasets/abc', data_type, path.split('/')[-2]), exist_ok=True)
+            with open(os.path.join('data_process/TopoDatasets/abc', data_type,  path.split('/')[-2], data['name']+'.pkl'), 'wb') as f:
+                pickle.dump(data, f)
 
         return 1
 
-    with open('data_process/deepcad_data_split_6bit.pkl', 'rb') as tf:
+    with open(os.path.join('data_process', option+'_data_split_6bit.pkl'), 'rb') as tf:
         if data_type == 'train':
             files = pickle.load(tf)['train']
         else:
             files = pickle.load(tf)
-            files = files['test'] + files['val']
+            files = files['test']
 
     valid = 0
     for file in tqdm(files):
@@ -348,5 +363,5 @@ class FaceEdgeDataset(torch.utils.data.Dataset):
 
 
 if __name__ == '__main__':
-    # create_topo_datasets(data_type='train', option='deepcad')
-    create_topo_datasets(data_type='test', option='deepcad')
+    # create_topo_datasets(data_type='train', option='abc')
+    create_topo_datasets(data_type='test', option='abc')

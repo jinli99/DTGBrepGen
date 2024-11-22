@@ -5,6 +5,8 @@ from tqdm import tqdm
 from multiprocessing.pool import Pool
 from occwl.io import load_step
 import json
+import concurrent.futures
+from multiprocessing import Process, Queue
 import numpy as np
 from occwl.uvgrid import ugrid, uvgrid
 from occwl.compound import Compound
@@ -17,10 +19,47 @@ from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSp
 from OCC.Core.GeomAbs import GeomAbs_C2
 from utils import load_data_with_prefix
 from functools import partial
-
+from threading import Thread
+from concurrent.futures import ProcessPoolExecutor
 
 # To speed up processing, define maximum threshold
 MAX_FACE = 70
+
+
+def process_with_timeout(func, arg, timeout=2):
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(func, arg)
+        try:
+            result = future.result(timeout=timeout)
+            return result
+        except concurrent.futures.TimeoutError:
+            return 0
+
+
+def load_step_with_timeout(step_path, timeout=2):
+    def _load_step(path, queue):
+        try:
+            result = load_step(path)
+            queue.put(result)
+        except Exception as e:
+            queue.put(e)
+
+    queue = Queue()
+    thread = Thread(target=_load_step, args=(step_path, queue))
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        return None
+
+    if queue.empty():
+        return None
+
+    result = queue.get()
+    if isinstance(result, Exception):
+        raise result
+    return result
 
 
 def normalize(face_pnts, edge_pnts, corner_pnts):
@@ -336,7 +375,7 @@ def count_fef_adj(face_edge):
 
     Args:
     - face_edge (list): Face-Edge List
-    
+
     Returns:
     - fef_adj (numpy.ndarray): Number of common edges between any paired faces
     """
@@ -344,7 +383,7 @@ def count_fef_adj(face_edge):
     fef_adj = np.zeros((num_faces, num_faces), dtype=int)
     face_edge_sets = [set(fe) for fe in face_edge]
     for i in range(num_faces):
-        for j in range(i+1, num_faces):
+        for j in range(i + 1, num_faces):
             common_elements = face_edge_sets[i].intersection(face_edge_sets[j])
             common_count = len(common_elements)
             fef_adj[i, j] = common_count
@@ -353,14 +392,7 @@ def count_fef_adj(face_edge):
     return fef_adj
 
 
-def construct_vv_list(edgeVert_adj):
-
-    vv_list = [(v1, v2, edge_id) for edge_id, (v1, v2) in enumerate(edgeVert_adj)]
-
-    return vv_list
-
-
-def process(step_folder, print_error=False, option='furniture'):
+def process(step_folder, print_error=False, option='deepcad'):
     """
     Helper function to load step files and process in parallel
 
@@ -369,6 +401,7 @@ def process(step_folder, print_error=False, option='furniture'):
     Returns:
     - Complete status: Valid (1) / Non-valid (0).
     """
+
     try:
 
         # Load cad data
@@ -377,6 +410,7 @@ def process(step_folder, print_error=False, option='furniture'):
 
         # Check single solid
         cad_solid = load_step(step_path)
+
         if len(cad_solid) != 1:
             if print_error:
                 print('Skipping multi solids...')
@@ -389,7 +423,7 @@ def process(step_folder, print_error=False, option='furniture'):
                 print('Exceeding threshold...')
             return 0  # number of faces or edges exceed pre-determined threshold
 
-        # Save the parsed result 
+        # Save the parsed result
         if option == 'furniture':
             data_uid = step_path.split('/')[-2] + '_' + step_path.split('/')[-1]
             sub_folder = step_path.split('/')[-3]
@@ -398,6 +432,8 @@ def process(step_folder, print_error=False, option='furniture'):
             sub_folder = step_path.split('/')[-2]
         else:
             assert option == 'abc'
+            data_uid = os.path.basename(step_path)
+            sub_folder = step_path.split('/')[-2]
 
         if data_uid.endswith('.step'):
             data_uid = data_uid[:-5]  # furniture avoid .step
@@ -410,19 +446,18 @@ def process(step_folder, print_error=False, option='furniture'):
         fef_adj = count_fef_adj(data['faceEdge_adj'])
         data['fef_adj'] = fef_adj
 
-        vv_list = construct_vv_list(data['edgeVert_adj'])
-        data['vv_list'] = vv_list
-
         nv = data['vert_wcs'].shape[0]
         vertex_edge_dict = {i: [] for i in range(nv)}
         for edge_id, (v1, v2) in enumerate(data['edgeVert_adj']):
             vertex_edge_dict[v1].append(edge_id)
             vertex_edge_dict[v2].append(edge_id)
 
-        vertex_edge = [vertex_edge_dict[i] for i in range(nv)]    # list[[edge_1, edge_2,...],...]
+        vertex_edge = [vertex_edge_dict[i] for i in range(nv)]  # list[[edge_1, edge_2,...],...]
         # list[[face_1, face_2,...], ...]
         vertexFace = [np.unique(data['edgeFace_adj'][i].reshape(-1)).tolist() for i in vertex_edge]
         data['vertFace_adj'] = vertexFace
+
+        data = bspline_fitting_local(data)
 
         save_path = os.path.join(save_folder, data['uid'] + '.pkl')
         with open(save_path, "wb") as tf:
@@ -435,51 +470,53 @@ def process(step_folder, print_error=False, option='furniture'):
         return 0
 
 
-def bspline_fitting_local(path):
+def mini_process():
+    steps = load_data_with_prefix('/home/jing/PythonProjects/BrepGDM/Supp/ctrs/', 'step')
+    for i in steps:
+        cad_solid = load_step(i)
+        data = parse_solid(cad_solid[0])
+        data = bspline_fitting_local(data)
+        with open(i.replace('step', 'pkl'), "wb") as tf:
+            pickle.dump(data, tf)
 
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
 
-    valid = 1
-
-    # data['edge_ctrs'] = None
+def bspline_fitting_local(data):
 
     # Fitting surface
-    # try:
-    #     face_ncs = data['face_ncs']    # nf*32*32*3
-    #     face_ctrs = []
-    #     for points in face_ncs:
-    #         num_u_points, num_v_points = 32, 32
-    #         uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
-    #         for u_index in range(1, num_u_points + 1):
-    #             for v_index in range(1, num_v_points + 1):
-    #                 pt = points[u_index - 1, v_index - 1]
-    #                 point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
-    #                 uv_points_array.SetValue(u_index, v_index, point_3d)
-    #         approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 3, GeomAbs_C2, 5e-2).Surface()
-    #         num_u_poles = approx_face.NbUPoles()
-    #         num_v_poles = approx_face.NbVPoles()
-    #         control_points = np.zeros((num_u_poles * num_v_poles, 3))
-    #         assert approx_face.UDegree() == approx_face.VDegree() == 3
-    #         assert num_u_poles == num_v_poles == 4
-    #         assert (not approx_face.IsUPeriodic() and not approx_face.IsVPeriodic() and not approx_face.IsVRational()
-    #                 and not approx_face.IsVPeriodic())
-    #         poles = approx_face.Poles()
-    #         idx = 0
-    #         for u in range(1, num_u_poles + 1):
-    #             for v in range(1, num_v_poles + 1):
-    #                 point = poles.Value(u, v)
-    #                 control_points[idx, :] = [point.X(), point.Y(), point.Z()]
-    #                 idx += 1
-    #         face_ctrs.append(control_points)
-    #     face_ctrs = np.stack(face_ctrs)    # nf*16*3
-    #     data['face_ctrs'] = face_ctrs
-    # except Exception as e:
-    #     data['face_ctrs'] = None
-    #     valid = 0
+    try:
+        face_ncs = data['face_ncs']    # nf*32*32*3
+        face_ctrs = []
+        for points in face_ncs:
+            num_u_points, num_v_points = 32, 32
+            uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
+            for u_index in range(1, num_u_points + 1):
+                for v_index in range(1, num_v_points + 1):
+                    pt = points[u_index - 1, v_index - 1]
+                    point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
+                    uv_points_array.SetValue(u_index, v_index, point_3d)
+            approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 3, GeomAbs_C2, 5e-2).Surface()
+            num_u_poles = approx_face.NbUPoles()
+            num_v_poles = approx_face.NbVPoles()
+            control_points = np.zeros((num_u_poles * num_v_poles, 3))
+            assert approx_face.UDegree() == approx_face.VDegree() == 3
+            assert num_u_poles == num_v_poles == 4
+            assert (not approx_face.IsUPeriodic() and not approx_face.IsVPeriodic() and not approx_face.IsVRational()
+                    and not approx_face.IsVPeriodic())
+            poles = approx_face.Poles()
+            idx = 0
+            for u in range(1, num_u_poles + 1):
+                for v in range(1, num_v_poles + 1):
+                    point = poles.Value(u, v)
+                    control_points[idx, :] = [point.X(), point.Y(), point.Z()]
+                    idx += 1
+            face_ctrs.append(control_points)
+        face_ctrs = np.stack(face_ctrs)    # nf*16*3
+        data['face_ctrs'] = face_ctrs
+    except Exception as e:
+        data['face_ctrs'] = None
 
     try:
-        edge_ncs = data['edge_ncs']        # ne*32*3
+        edge_ncs = data['edge_ncs']  # ne*32*3
         edge_ctrs = []
         for points in edge_ncs:
             num_u_points = 32
@@ -511,53 +548,44 @@ def bspline_fitting_local(path):
         data['edge_ctrs'] = edge_ctrs
     except Exception as e:
         data['edge_ctrs'] = None
-        valid = 0
 
-    return data, valid
+    return data
 
 
 def main():
-
-    files = load_data_with_prefix('data_process/GeomDatasets/deepcad_parsed', '.pkl')
-    print(len(files))
-
-    files = ['/home/jing/PythonProjects/BrepGDM/data_process/GeomDatasets/deepcad_parsed/0071/00716434_c8000d0dab984f68f0a79d91_step_032.pkl']
-
-    total_valid = 0
+    files = load_data_with_prefix('data_process/GeomDatasets/furniture_parsed', 'pkl')
     for file in tqdm(files):
-        data, valid = bspline_fitting_local(file)
-        total_valid += valid
-        with open(file, "wb") as tf:
-            pickle.dump(data, tf)
-    print(total_valid)
+        with open(file, 'rb') as f:
+            data = pickle.load(f)
+        data = bspline_fitting_local(data)
+        with open(file, 'wb') as f:
+            pickle.dump(data, f)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, help="Data folder path", default='/home/jing/Datasets/DeepCAD')
-    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
-                        help="Choose between dataset option [abc/deepcad/furniture] (default: abc)")
-    parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--input", type=str, help="Data folder path",
+    #                     default='/home/jing/Datasets/DeepCAD')
+    # parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
+    #                     help="Choose between dataset option [abc/deepcad/furniture]")
+    # parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
+    # args = parser.parse_args()
+    #
+    # if args.option == 'deepcad':
+    #     OUTPUT = 'GeomDatasets/deepcad_parsed'
+    # elif args.option == 'abc':
+    #     OUTPUT = 'GeomDatasets/abc_parsed'
+    # else:
+    #     OUTPUT = 'GeomDatasets/furniture_parsed'
+    #
+    # step_dirs = load_steps(args.input)
+    #
+    # process_with_option = partial(process, option=args.option)
+    # process_with_timeout_option = partial(process_with_timeout, process_with_option)
+    #
+    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    #     results = list(executor.map(process_with_timeout_option, step_dirs))
 
-    if args.option == 'deepcad':
-        OUTPUT = 'GeomDatasets/deepcad_parsed'
-    elif args.option == 'abc':
-        OUTPUT = 'GeomDatasets/abc_parsed'
-    else:
-        OUTPUT = 'GeomDatasets/furniture_parsed'
+    # main()
 
-    step_dirs = load_steps(args.input)
-
-    process_with_option = partial(process, option=args.option)
-
-    # Process B-reps in parallel
-    # for i in tqdm(step_dirs):
-    #     process_with_option(i)
-    # valid = 0
-    # convert_iter = Pool(os.cpu_count()).imap(process_with_option, step_dirs)
-    # for status in tqdm(convert_iter, total=len(step_dirs)):
-    #     valid += status
-    # print(f'Done... Data Converted Ratio {100.0 * valid / len(step_dirs)}%', valid, len(step_dirs))
-
-    main()
+    mini_process()

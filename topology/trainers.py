@@ -88,6 +88,7 @@ class FaceEdgeTrainer:
             # logging
             if self.iters % 20 == 0:
                 wandb.log({"Loss": loss}, step=self.iters)
+                print("******", loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -239,6 +240,7 @@ class EdgeVertTrainer:
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": loss},
                           step=self.iters)
+                print("******", loss.item())
 
             self.iters += 1
             progress_bar.update(1)

@@ -1491,86 +1491,86 @@ class Embedder(nn.Module):
         return self.embed(x)
 
 
-class FaceBboxTransformer(nn.Module):
-    """
-    n_layers : int -- number of layers
-    dims : dict -- contains dimensions for each feature type
-    """
-    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict, edge_classes: int,
-                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
-        super().__init__()
-        self.n_layers = n_layers
-        self.use_cf = use_cf
-
-        self.mlp_in_X = nn.Sequential(nn.Linear(6, hidden_mlp_dims['x']), act_fn_in,
-                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
-
-        self.mlp_in_E = nn.Embedding(edge_classes, hidden_dims['de'])
-
-        self.embed_dim = hidden_dims['dx']
-
-        self.time_embed = nn.Sequential(
-            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
-            nn.LayerNorm(hidden_dims['dx']),
-            nn.SiLU(),
-            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
-        )
-
-        self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
-                                                                 de=hidden_dims['de'],
-                                                                 n_head=hidden_dims['n_head'],
-                                                                 dim_ffX=hidden_dims['dim_ffX'])
-                                        for i in range(n_layers)])
-
-        self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
-                                       nn.Linear(hidden_mlp_dims['x'], 6))
-
-        # FiLM E to X
-        self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
-        self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
-
-        if self.use_cf:
-            self.class_embed = Embedder(11, self.embed_dim)
-
-    def forward(self, x_t, e, mask, class_label, t):
-        """
-        Args:
-        - x_t: b*nf*6
-        - e: b*nf*nf
-        - mask: b*nf
-        - class_label: b*1
-        - t: b*1
-        """
-
-        X_to_out = x_t
-
-        new_E = self.mlp_in_E(e)
-        new_E = (new_E + new_E.transpose(1, 2)) / 2
-
-        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
-
-        tokens = self.mlp_in_X(x_t)+time_embeds
-        if self.use_cf:
-            if self.training:
-                # randomly set 10% to uncond label
-                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
-                class_label[uncond_mask] = 0
-            c_embeds = self.class_embed(class_label)
-            tokens += c_embeds
-
-        x, e = xe_mask(x=tokens, e=new_E, node_mask=mask)
-
-        e_add = self.e_add(e)
-        e_mul = self.e_mul(e)
-        for layer in self.tf_layers:
-            x = layer(x, e_add, e_mul, mask)
-
-        x = self.mlp_out_X(x)
-        x = (x + X_to_out)
-
-        x, _ = xe_mask(x=x, node_mask=mask)
-
-        return x
+# class FaceBboxTransformer(nn.Module):
+#     """
+#     n_layers : int -- number of layers
+#     dims : dict -- contains dimensions for each feature type
+#     """
+#     def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict, edge_classes: int,
+#                  act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+#         super().__init__()
+#         self.n_layers = n_layers
+#         self.use_cf = use_cf
+#
+#         self.mlp_in_X = nn.Sequential(nn.Linear(6, hidden_mlp_dims['x']), act_fn_in,
+#                                       nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+#
+#         self.mlp_in_E = nn.Embedding(edge_classes, hidden_dims['de'])
+#
+#         self.embed_dim = hidden_dims['dx']
+#
+#         self.time_embed = nn.Sequential(
+#             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+#             nn.LayerNorm(hidden_dims['dx']),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+#         )
+#
+#         self.tf_layers = nn.ModuleList([FaceGeomTransformerLayer(dx=hidden_dims['dx'],
+#                                                                  de=hidden_dims['de'],
+#                                                                  n_head=hidden_dims['n_head'],
+#                                                                  dim_ffX=hidden_dims['dim_ffX'])
+#                                         for i in range(n_layers)])
+#
+#         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
+#                                        nn.Linear(hidden_mlp_dims['x'], 6))
+#
+#         # FiLM E to X
+#         self.e_add = Linear(hidden_dims['de'], hidden_dims['dx'])
+#         self.e_mul = Linear(hidden_dims['de'], hidden_dims['dx'])
+#
+#         if self.use_cf:
+#             self.class_embed = Embedder(11, self.embed_dim)
+#
+#     def forward(self, x_t, e, mask, class_label, t):
+#         """
+#         Args:
+#         - x_t: b*nf*6
+#         - e: b*nf*nf
+#         - mask: b*nf
+#         - class_label: b*1
+#         - t: b*1
+#         """
+#
+#         X_to_out = x_t
+#
+#         new_E = self.mlp_in_E(e)
+#         new_E = (new_E + new_E.transpose(1, 2)) / 2
+#
+#         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
+#
+#         tokens = self.mlp_in_X(x_t)+time_embeds
+#         if self.use_cf:
+#             if self.training:
+#                 # randomly set 10% to uncond label
+#                 uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+#                 class_label[uncond_mask] = 0
+#             c_embeds = self.class_embed(class_label)
+#             tokens += c_embeds
+#
+#         x, e = xe_mask(x=tokens, e=new_E, node_mask=mask)
+#
+#         e_add = self.e_add(e)
+#         e_mul = self.e_mul(e)
+#         for layer in self.tf_layers:
+#             x = layer(x, e_add, e_mul, mask)
+#
+#         x = self.mlp_out_X(x)
+#         x = (x + X_to_out)
+#
+#         x, _ = xe_mask(x=x, node_mask=mask)
+#
+#         return x
 
 
 # class VertGeomTransformer(nn.Module):
@@ -1667,21 +1667,73 @@ class FaceBboxTransformer(nn.Module):
 #         return x
 
 
-class VertGeomTransformer(nn.Module):
-    """
-    n_layers : int -- number of layers
-    dims : dict -- contains dimensions for each feature type
-    """
-    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
-                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+class GraphformerAttention(nn.Module):
+    def __init__(self, hidden_dim, num_heads, dropout=0.1):
         super().__init__()
-        self.n_layers = n_layers
-        self.use_cf = use_cf
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        assert self.head_dim * num_heads == hidden_dim,     "hidden_dim must be divisible by num_heads"
+        self.scaling = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
-        self.mlp_in_X = nn.Sequential(nn.Linear(3, hidden_mlp_dims['x']), act_fn_in,
-                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, spatial_bias=None, key_padding_mask=None):
+        """
+        Args:
+            query: [batch_size, seq_len, hidden_dim]
+            key: [batch_size, seq_len, hidden_dim]
+            value: [batch_size, seq_len, hidden_dim]
+            spatial_bias: [batch_size, num_heads, seq_len, seq_len]
+            key_padding_mask: [batch_size, seq_len] (True for padding)
+        """
+        batch_size, seq_len, hidden_dim = query.shape
+
+        q = self.q_proj(query).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = self.k_proj(key).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = self.v_proj(value).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling  # [batch_size, num_heads, seq_len, seq_len]
+
+        if spatial_bias is not None:
+            attn_weights = attn_weights + spatial_bias
+
+        if key_padding_mask is not None:
+            attn_weights = attn_weights.masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
+                float('-inf')
+            )
+
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        out = torch.matmul(attn_weights, v)  # [batch_size, num_heads, seq_len, head_dim]
+
+        out = out.transpose(1, 2).reshape(batch_size, seq_len, hidden_dim)
+        out = self.out_proj(out)
+
+        return out, attn_weights
+
+
+class FaceBboxTransformer(nn.Module):
+    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict, edge_classes: int,
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+
+        dropout = 0.1
+
+        super().__init__()
 
         self.embed_dim = hidden_dims['dx']
+        self.n_head = hidden_dims['n_head']
+        self.max_path_distance = edge_classes
+        self.use_cf = use_cf
 
         self.time_embed = nn.Sequential(
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
@@ -1690,55 +1742,51 @@ class VertGeomTransformer(nn.Module):
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
         )
 
-        self.face_bbox_embed = nn.Sequential(
-            nn.Linear(6, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim),
-        )
+        self.mlp_in_X = nn.Sequential(nn.Linear(6, hidden_mlp_dims['x']), act_fn_in,
+                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
 
-        n_head = hidden_dims['n_head']
-        self.tf_layers = nn.ModuleList([
-            TransformerConv(
-                in_channels=self.embed_dim,
-                out_channels=self.embed_dim // n_head,
-                heads=n_head,
-                dropout=0.1,
-                edge_dim=None  #
-            ) for _ in range(n_layers)
-        ])
+        self.spatial_pos_encoder = Embedder(self.max_path_distance + 1, self.n_head)
 
-        # Layer Normalization
-        self.layer_norms = nn.ModuleList([
-            nn.LayerNorm(self.embed_dim) for _ in range(n_layers)
-        ])
+        # Transformer
+        self.layers = nn.ModuleList([])
+        for _ in range(n_layers):
+            self.layers.append(nn.ModuleList([
+                nn.LayerNorm(self.embed_dim),
+                GraphformerAttention(self.embed_dim, self.n_head, dropout),
+                nn.LayerNorm(self.embed_dim),
+                nn.Sequential(
+                    nn.Linear(self.embed_dim, self.embed_dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(self.embed_dim * 4, self.embed_dim),
+                    nn.Dropout(dropout)
+                )
+            ]))
 
         self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
-                                       nn.Linear(hidden_mlp_dims['x'], 3))
+                                       nn.Linear(hidden_mlp_dims['x'], 6))
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.embed_dim)
 
-    def forward(self, x_t, mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label, t):
+    def forward(self, x_t, e, mask, class_label, t):
         """
         Args:
-        - x_t: b*nv*3
-        - e: b*nv*nv*2
-        - mask: b*nv
-        - vertFace_bbox: b*nv*vf*6
-        - vertFace_mask: b*nv*vf
-        - edgeVert_adj: b*ne*2
-        - edge_mask: b*ne
+        - x_t: b*nf*6
+        - e: b*nf*nf
+        - mask: b*nf
         - class_label: b*1
         - t: b*1
         """
 
+        e = e + 1
+        batch_size, nf, _ = x_t.shape
+
+        e.masked_fill_(torch.eye(nf, device=e.device).bool().unsqueeze(0), 0)
+
         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
 
-        vertFace_embeds = self.face_bbox_embed(vertFace_bbox)               # b*nv*vf*embed_dim
-        vertFace_embeds = vertFace_embeds.sum(-2) / (vertFace_mask.sum(-1, keepdim=True)+1e-8)     # b*nv*embed_dim
-
-        tokens = self.mlp_in_X(x_t)+time_embeds+vertFace_embeds             # b*nv*embed_dim
+        tokens = self.mlp_in_X(x_t)+time_embeds
         if self.use_cf:
             if self.training:
                 # randomly set 10% to uncond label
@@ -1747,35 +1795,183 @@ class VertGeomTransformer(nn.Module):
             c_embeds = self.class_embed(class_label)
             tokens += c_embeds
 
-        x, _ = xe_mask(x=tokens, node_mask=mask)                           # b*nv*embed_dim
+        spatial_pos_bias = self.spatial_pos_encoder(e)          # [B, nf, nf, num_heads]
+        x, e = xe_mask(x=tokens, e=spatial_pos_bias, node_mask=mask)
+        e = spatial_pos_bias.permute(0, 3, 1, 2)                # [B, num_heads, nf, nf]
 
-        data_list = []
-        for i in range(x.shape[0]):
-            valid_edges = edgeVert_adj[i][edge_mask[i]]
-            valid_nodes = x[i][mask[i]]
-            data = Data(
-                x=valid_nodes,
-                edge_index=valid_edges.T
+        for norm1, attn, norm2, ffn in self.layers:
+            # Pre-LayerNorm
+            x_norm = norm1(x)
+
+            # Self-attention
+            attn_out, _ = attn(
+                x_norm, x_norm, x_norm,
+                spatial_bias=e,
+                key_padding_mask=~mask                          # False for valid positions
             )
-            data_list.append(data)
-        batch = Batch.from_data_list(data_list)
 
-        x = batch.x
-        for transformer, norm in zip(self.tf_layers, self.layer_norms):
-            x_res = transformer(x, batch.edge_index)
-            x = norm(x + x_res)
-            x = torch.nn.functional.gelu(x)
+            x = x + attn_out * mask.unsqueeze(-1)
 
-        noise = self.mlp_out_X(x)
-        noise, mask_new = to_dense_batch(noise, batch.batch)
-        noise = torch.nn.functional.pad(noise, (0, 0, 0, x_t.shape[1] - noise.shape[1]), "constant", 0)
+            # FFN
+            x_norm = norm2(x)
+            x = x + ffn(x_norm) * mask.unsqueeze(-1)
 
-        assert torch.all(torch.eq(mask_new.sum(-1), mask.sum(-1)))
-        noise, _ = xe_mask(x=noise, node_mask=mask)
+        noise = self.mlp_out_X(x)                               # [B, nv, 3]
 
-        # output = torch.zeros_like(x_t)
-        # for i in range(x_t.shape[0]):
-        #     output[i][mask[i]] = noise[i][mask_new[i]]
+        noise = noise * mask.unsqueeze(-1)
+
+        return noise
+
+
+class VertGeomTransformer(nn.Module):
+    def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+
+        dropout = 0.1
+
+        super().__init__()
+
+        self.node_dim = 3
+        self.embed_dim = hidden_dims['dx']
+        self.n_head = hidden_dims['n_head']
+        self.max_path_distance = 2
+        self.use_cf = use_cf
+
+        self.time_embed = nn.Sequential(
+            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+            nn.LayerNorm(hidden_dims['dx']),
+            nn.SiLU(),
+            nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
+        )
+
+        self.mlp_in_X = nn.Sequential(nn.Linear(3, hidden_mlp_dims['x']), act_fn_in,
+                                      nn.Linear(hidden_mlp_dims['x'], hidden_dims['dx']), act_fn_in)
+
+        self.face_bbox_embed = nn.Sequential(
+            nn.Linear(6, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.SiLU(),
+            nn.Linear(self.embed_dim, self.embed_dim),
+        )
+
+        self.spatial_pos_encoder = Embedder(self.max_path_distance + 1, self.n_head)
+
+        # Transformer
+        self.layers = nn.ModuleList([])
+        for _ in range(n_layers):
+            self.layers.append(nn.ModuleList([
+                nn.LayerNorm(self.embed_dim),
+                GraphformerAttention(self.embed_dim, self.n_head, dropout),
+                nn.LayerNorm(self.embed_dim),
+                nn.Sequential(
+                    nn.Linear(self.embed_dim, self.embed_dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(self.embed_dim * 4, self.embed_dim),
+                    nn.Dropout(dropout)
+                )
+            ]))
+
+        self.mlp_out_X = nn.Sequential(nn.Linear(hidden_dims['dx'], hidden_mlp_dims['x']), act_fn_out,
+                                       nn.Linear(hidden_mlp_dims['x'], 3))
+
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.embed_dim)
+
+    # def compute_shortest_path_distance(self, edgeVert_adj, edge_mask):
+    #     """计算最短路径距离矩阵"""
+    #     batch_size, ne, _ = edgeVert_adj.shape
+    #     nv = vert_mask.shape[1]
+    #     device = edgeVert_adj.device
+    #
+    #     # 初始化距离矩阵
+    #     distances = torch.full((batch_size, nv, nv), float('inf'), device=device)
+    #
+    #     # 设置对角线为0
+    #     for i in range(batch_size):
+    #         distances[i][torch.arange(nv), torch.arange(nv)] = 0
+    #
+    #         # 设置直接相连的边的距离为1
+    #         valid_edges = edge_mask[i]
+    #         src = edgeVert_adj[i, valid_edges, 0]
+    #         dst = edgeVert_adj[i, valid_edges, 1]
+    #         distances[i][src, dst] = 1
+    #         distances[i][dst, src] = 1
+    #
+    #     # Floyd-Warshall算法
+    #     for i in range(batch_size):
+    #         valid_nodes = vert_mask[i]
+    #         for k in range(nv):
+    #             if not valid_nodes[k]:
+    #                 continue
+    #             for s in range(nv):
+    #                 if not valid_nodes[s]:
+    #                     continue
+    #                 for t in range(nv):
+    #                     if not valid_nodes[t]:
+    #                         continue
+    #                     new_dist = distances[i][s][k] + distances[i][k][t]
+    #                     distances[i][s][t] = min(distances[i][s][t], new_dist)
+    #
+    #     # 将距离截断到max_path_distance
+    #     distances.clamp_(0, self.max_path_distance)
+    #     return distances.long()  # 确保是整数类型用于embedding查找
+
+    def forward(self, x_t, e, mask, vertFace_bbox, vertFace_mask, class_label, t):
+        """
+        Args:
+        - x_t: b*nv*3
+        - e: b*nv*nv
+        - mask: b*nv
+        - vertFace_bbox: b*nv*vf*6
+        - vertFace_mask: b*nv*vf
+        - class_label: b*1
+        - t: b*1
+        """
+
+        e = e + 1
+        batch_size, nv, _ = x_t.shape
+
+        e.masked_fill_(torch.eye(nv, device=e.device).bool().unsqueeze(0), 0)
+
+        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
+
+        vertFace_embeds = self.face_bbox_embed(vertFace_bbox)               # b*nv*vf*embed_dim
+        vertFace_embeds = vertFace_embeds.sum(-2) / (vertFace_mask.sum(-1, keepdim=True)+1e-8)     # b*nv*embed_dim
+
+        tokens = self.mlp_in_X(x_t)+time_embeds+vertFace_embeds
+        if self.use_cf:
+            if self.training:
+                # randomly set 10% to uncond label
+                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+                class_label[uncond_mask] = 0
+            c_embeds = self.class_embed(class_label)
+            tokens += c_embeds
+
+        spatial_pos_bias = self.spatial_pos_encoder(e)          # [B, nv, nv, num_heads]
+        x, e = xe_mask(x=tokens, e=spatial_pos_bias, node_mask=mask)
+        e = spatial_pos_bias.permute(0, 3, 1, 2)                # [B, num_heads, nv, nv]
+
+        for norm1, attn, norm2, ffn in self.layers:
+            # Pre-LayerNorm
+            x_norm = norm1(x)
+
+            # Self-attention
+            attn_out, _ = attn(
+                x_norm, x_norm, x_norm,
+                spatial_bias=e,
+                key_padding_mask=~mask                          # False for valid positions
+            )
+
+            x = x + attn_out * mask.unsqueeze(-1)
+
+            # FFN
+            x_norm = norm2(x)
+            x = x + ffn(x_norm) * mask.unsqueeze(-1)
+
+        noise = self.mlp_out_X(x)                               # [B, nv, 3]
+
+        noise = noise * mask.unsqueeze(-1)
 
         return noise
 
@@ -1965,12 +2161,12 @@ class FaceGeomTransformer(nn.Module):
     Transformer-based latent diffusion model for face feature
     """
 
-    def __init__(self, n_layers: int, face_geom_dim: int):
+    def __init__(self, n_layers: int, face_geom_dim: int, d_model: int, nhead: int, use_cf: bool):
         super().__init__()
-        self.embed_dim = 768
-        assert not self.embed_dim % 16
+        self.embed_dim = d_model
+        self.use_cf = use_cf
 
-        layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=12, norm_first=True,
+        layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=nhead, norm_first=True,
                                            dim_feedforward=1024, dropout=0.1)
         self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
 
@@ -2016,7 +2212,10 @@ class FaceGeomTransformer(nn.Module):
             nn.Linear(self.embed_dim, face_geom_dim),
         )
 
-    def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, t):
+        if self.use_cf:
+            self.class_embed = Embedder(11, self.embed_dim)
+
+    def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label, t):
         """
             Args:
                 x_t: [batch_size, nf, 48]
@@ -2026,6 +2225,7 @@ class FaceGeomTransformer(nn.Module):
                 face_mask: [batch_size, nf]
                 faceVert_mask: [batch_size, nf, fv]
                 faceEdge_mask: [batch_size, nf, fe]
+                class_label: [batch_size, 1]
                 t: [batch_size, 1]
             Returns:
                 Noise prediction with shape [batch_size, nf, 48]
@@ -2043,6 +2243,14 @@ class FaceGeomTransformer(nn.Module):
         faceEdge_embeds = faceEdge_embeds.sum(-2) / (faceEdge_mask.sum(-1, keepdim=True)+1e-8)     # b*nf*embed_dim
 
         tokens = face_geom_embeds + face_bbox_embeds + faceVert_embeds + faceEdge_embeds + time_embeds         # b*nf*embed_dim
+
+        if self.use_cf:
+            if self.training:
+                # randomly set 10% to uncond label
+                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
+                class_label[uncond_mask] = 0
+            c_embeds = self.class_embed(class_label)
+            tokens += c_embeds
 
         output = self.net(
             src=tokens.permute(1, 0, 2),
@@ -2300,7 +2508,7 @@ class FaceEdgeModel(nn.Module):
             output = self.decode(z, generated, class_label)
             next_token = torch.distributions.Categorical(logits=output[:, -1, :]).sample()
             generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=1)
-
+        torch.cuda.empty_cache()
         return self.sequence_to_matrix(generated[:, 1:])
 
     def sequence_to_matrix(self, sequence):

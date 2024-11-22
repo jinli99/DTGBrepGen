@@ -6,9 +6,7 @@ import torch.nn as nn
 from diffusers import AutoencoderKL, DDPMScheduler
 from model import (AutoencoderKL1D, FaceBboxTransformer, AutoencoderKLFastEncode, AutoencoderKL1DFastEncode,
                    FaceGeomTransformer, VertGeomTransformer, EdgeGeomTransformer)
-from geometry.diffusion import DDPM
 from utils import xe_mask, make_mask
-from geometry.dataFeature import GraphFeatures
 
 
 class FaceVaeTrainer:
@@ -366,6 +364,7 @@ class FaceBboxTrainer:
             # logging
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": face_mse_loss}, step=self.iters)
+                print("*****", face_mse_loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -394,8 +393,8 @@ class FaceBboxTrainer:
                     face_bbox, fef_adj, face_mask = data  # b*nf*6, b*nf*nf, b*1,
                     class_label = None
                 nf = face_mask.max()
-                face_bbox = face_bbox[:, :nf, :]  # b*nf*6
-                fef_adj = fef_adj[:, :nf, :nf]  # b*nf*nf
+                face_bbox = face_bbox[:, :nf, :]      # b*nf*6
+                fef_adj = fef_adj[:, :nf, :nf]        # b*nf*nf
                 face_mask = make_mask(face_mask, nf)  # b*nf
 
                 x_0, e = xe_mask(x=face_bbox, e=fef_adj.unsqueeze(-1), node_mask=face_mask)  # b*nf*6, b*nv*nv*1
@@ -512,17 +511,22 @@ class VertGeomTrainer:
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
-                ne = edge_mask.max()
                 vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
                 vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
                 vert_mask = make_mask(vert_mask, nv)                          # b*nv
                 vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
-                edgeVert_adj = edgeVert_adj[:, :ne, :]                        # b*ne*2
 
-                edge_mask = make_mask(edge_mask, ne)                          # b*ne
+                edge_mask = make_mask(edge_mask, edge_mask.max())             # b*ne
+                batch_indices, edge_indices = edge_mask.nonzero(as_tuple=True)
+                rows = edgeVert_adj[batch_indices, edge_indices, 0]
+                cols = edgeVert_adj[batch_indices, edge_indices, 1]
+                vv_adj = torch.zeros((vert_geom.shape[0], nv, nv), device=self.device, dtype=torch.long)
+                vv_adj[batch_indices, rows, cols] = 1
+                vv_adj[batch_indices, cols, rows] = 1
 
-                x_0, _ = xe_mask(x=vert_geom, node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
+                x_0, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
+                e = e.squeeze(-1)
 
                 self.optimizer.zero_grad()  # zero gradient
 
@@ -532,8 +536,7 @@ class VertGeomTrainer:
                 noise = torch.randn(x_0.shape).to(self.device)
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
-                pred_noise = self.model(x_t, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask,
-                                        class_label, t.unsqueeze(-1))  # b*nv*3
+                pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))  # b*nv*3
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -583,17 +586,23 @@ class VertGeomTrainer:
                     class_label = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
-                ne = edge_mask.max()
                 vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
                 vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
                 vert_mask = make_mask(vert_mask, nv)                          # b*nv
                 vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
-                edgeVert_adj = edgeVert_adj[:, :ne, :]                        # b*ne*2
 
-                edge_mask = make_mask(edge_mask, ne)                          # b*ne
+                edge_mask = make_mask(edge_mask, edge_mask.max())             # b*ne
+                batch_indices, edge_indices = edge_mask.nonzero(as_tuple=True)
+                rows = edgeVert_adj[batch_indices, edge_indices, 0]
+                cols = edgeVert_adj[batch_indices, edge_indices, 1]
+                vv_adj = torch.zeros((vert_geom.shape[0], nv, nv), device=self.device, dtype=torch.long)
+                vv_adj[batch_indices, rows, cols] = 1
+                vv_adj[batch_indices, cols, rows] = 1
 
-                x_0, _ = xe_mask(x=vert_geom, node_mask=vert_mask)            # b*nv*3, b*nv*nv*1
+                x_0, e = xe_mask(x=vert_geom, e=vv_adj.unsqueeze(-1), node_mask=vert_mask)  # b*nv*3, b*nv*nv*1
+                e = e.squeeze(-1)
+
                 total_count += 1
 
                 for idx, step in enumerate([10, 50, 100, 200, 500]):
@@ -605,8 +614,7 @@ class VertGeomTrainer:
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict start
-                    pred_noise = self.model(x_t, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask,
-                                            class_label, t.unsqueeze(-1))  # b*nv*3
+                    pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))  # b*nv*3
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")
@@ -749,6 +757,7 @@ class EdgeGeomTrainer:
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": loss},
                           step=self.iters)
+                print("*****", loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -836,7 +845,11 @@ class FaceGeomTrainer:
         self.edge_classes = args.edge_classes
 
         # Initialize network
-        model = FaceGeomTransformer(n_layers=8, face_geom_dim=48)
+        model = FaceGeomTransformer(n_layers=args.FaceGeomModel['n_layers'],
+                                    face_geom_dim=args.FaceGeomModel['face_geom_dim'],
+                                    d_model=args.FaceGeomModel['d_model'],
+                                    nhead=args.FaceGeomModel['nhead'],
+                                    use_cf=self.use_cf)
         model = nn.DataParallel(model)    # distributed training
         self.model = model.to(self.device).train()
 
@@ -917,7 +930,7 @@ class FaceGeomTrainer:
 
                 # Predict noise
                 pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask,
-                                        faceEdge_mask, t.unsqueeze(-1))   # b*n*48
+                                        faceEdge_mask, class_label, t.unsqueeze(-1))   # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -936,6 +949,7 @@ class FaceGeomTrainer:
             # logging
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": face_mse_loss}, step=self.iters)
+                print("******", face_mse_loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -981,27 +995,27 @@ class FaceGeomTrainer:
                 x_0 = face_geom * self.z_scaled                      # b*nf*48
                 x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
-            total_count += 1
+                total_count += 1
 
-            for idx, step in enumerate([10, 50, 100, 200, 500]):
-                # Evaluate at timestep
-                t = torch.randint(step - 1, step, (x_0.shape[0], ), device=self.device).long()  # b
-                noise = torch.randn(x_0.shape).to(self.device)
-                x_t = self.noise_scheduler.add_noise(x_0, noise, t)
+                for idx, step in enumerate([10, 50, 100, 200, 500]):
+                    # Evaluate at timestep
+                    t = torch.randint(step - 1, step, (x_0.shape[0], ), device=self.device).long()  # b
+                    noise = torch.randn(x_0.shape).to(self.device)
+                    x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
-                # Predict noise
-                pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask,
-                                        faceEdge_mask, t.unsqueeze(-1))   # b*n*48
+                    # Predict noise
+                    pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask,
+                                            faceEdge_mask, class_label, t.unsqueeze(-1))   # b*n*48
 
-                if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
-                    print("Has nan!!!!")
-                    torch.save(pred_noise.detach().cpu(), 'bad_noise.pt')
-                    assert False
+                    if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
+                        print("Has nan!!!!")
+                        torch.save(pred_noise.detach().cpu(), 'bad_noise.pt')
+                        assert False
 
-                # Loss
-                face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise[face_mask])
+                    # Loss
+                    face_mse_loss = torch.nn.functional.mse_loss(pred_noise[face_mask], noise[face_mask])
 
-                total_loss[idx] += face_mse_loss
+                    total_loss[idx] += face_mse_loss
 
             progress_bar.update(1)
         progress_bar.close()

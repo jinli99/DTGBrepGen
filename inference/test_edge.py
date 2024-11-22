@@ -10,9 +10,10 @@ from argparse import Namespace
 from utils import sort_bbox_multi
 from OCC.Extend.DataExchange import write_step_file
 from brepBuild import Brep2Mesh
-from inference.generate import get_brep, get_edgeGeom, text2int
+from inference.generate_noface import get_brep, get_edgeGeom, text2int, process_batch
 from test_geom import get_topology
 import warnings
+from visualization import *
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -56,7 +57,7 @@ def main(args):
     with open(os.path.join('inference', args.name+'_test.pkl'), 'rb') as f:
         batch_file = pickle.load(f)
 
-    # batch_file = ['couch/partstudio_0122.pkl']
+    # batch_file = ['0043/00430955_c26691020550789cc8812e7f_step_000.pkl']
 
     b_each = 16 if args.name == 'furniture' else 32
     for i in tqdm(range(0, len(batch_file), b_each)):
@@ -84,18 +85,10 @@ def main(args):
         edge_geom = [i[j] for i, j in zip(edge_geom, edge_mask)]                 # [ne*12, ...]
 
         # =======================================Construct Brep================================================ #
-        for j in range(b):
-            solid = get_brep((face_bbox[j].cpu().numpy() / args.bbox_scaled,
-                              vert_geom[j].cpu().numpy() / args.bbox_scaled,
-                              edge_geom[j].cpu().numpy() / args.bbox_scaled,
-                              edgeFace_adj[j].cpu().numpy(),
-                              edgeVert_adj[j].cpu().numpy(),
-                              faceEdge_adj[j]))
-
-            if solid is False:
-                continue
-            save_name = datas['name'][j]
-            write_step_file(solid, f'{args.save_folder}/{save_name}.step')
+        success_count = process_batch(face_bbox, vert_geom, edge_geom,
+                                      edgeFace_adj, edgeVert_adj, faceEdge_adj,
+                                      args, class_label)
+        print(f"Successfully processed {success_count} items out of {b}")
 
     print('write stl...')
     mesh_tool = Brep2Mesh(input_path=args.save_folder)
@@ -105,11 +98,13 @@ def main(args):
 if __name__ == '__main__':
     mp.set_start_method('spawn')
 
-    name = 'deepcad'
+    name = 'furniture'
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
     config['save_folder'] = os.path.join('samples', name)
+    # config['save_folder'] = 'bug'
     config['name'] = name
+    config['parallel'] = True
 
     main(args=Namespace(**config))

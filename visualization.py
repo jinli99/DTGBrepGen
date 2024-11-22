@@ -1,25 +1,57 @@
 import os
+import random
+import math
 import plotly.offline as pyo
 import plotly.graph_objects as go
 import numpy as np
 from OCC.Display.SimpleGui import init_display
 from OCC.Core.STEPControl import STEPControl_Reader
-from utils import load_data_with_prefix
 from OCC.Core.IFSelect import IFSelect_RetDone
+from OCC.Core.gp import gp_Trsf, gp_Vec
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
+from OCC.Core.AIS import AIS_Shape
+import open3d as o3d
+from utils import load_data_with_prefix
 
 
-def draw_bfep(bbox=None, faces=None, edges=None, points=None):
-    # nf*6, nf*32*32*3, ne*32*3, nv*3
+def draw_bfep(bbox=None, faces=None, edges=None, points=None, label=False, bbox_fill=False):
     fig = go.Figure()
 
     # Helper function to draw boxes
     def draw_boxes(bbox, colors):
         for i in range(bbox.shape[0]):
             box = bbox[i].reshape(2, 3)
-            x = [box[0, 0], box[1, 0], box[1, 0], box[0, 0], box[0, 0], box[0, 0], box[1, 0], box[1, 0], box[1, 0], box[0, 0], box[0, 0], box[1, 0]]
-            y = [box[0, 1], box[0, 1], box[1, 1], box[1, 1], box[0, 1], box[0, 1], box[0, 1], box[0, 1], box[1, 1], box[1, 1], box[1, 1], box[1, 1]]
-            z = [box[0, 2], box[0, 2], box[0, 2], box[0, 2], box[0, 2], box[1, 2], box[1, 2], box[1, 2], box[1, 2], box[1, 2], box[0, 2], box[0, 2]]
-            fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='lines', line=dict(color=colors[i]), name=f'box_{i}'))
+            if bbox_fill:
+                # Draw 6 faces of the box using Mesh3d
+                vertices = np.array([
+                    [box[0, 0], box[0, 1], box[0, 2]],
+                    [box[1, 0], box[0, 1], box[0, 2]],
+                    [box[1, 0], box[1, 1], box[0, 2]],
+                    [box[0, 0], box[1, 1], box[0, 2]],
+                    [box[0, 0], box[0, 1], box[1, 2]],
+                    [box[1, 0], box[0, 1], box[1, 2]],
+                    [box[1, 0], box[1, 1], box[1, 2]],
+                    [box[0, 0], box[1, 1], box[1, 2]],
+                ])
+                # Define the faces of the box
+                i_faces = [
+                    [0, 1, 2, 3],  # Bottom face
+                    [4, 5, 6, 7],  # Top face
+                    [0, 1, 5, 4],  # Side face 1
+                    [1, 2, 6, 5],  # Side face 2
+                    [2, 3, 7, 6],  # Side face 3
+                    [3, 0, 4, 7]   # Side face 4
+                ]
+                for face in i_faces:
+                    x, y, z = vertices[face, 0], vertices[face, 1], vertices[face, 2]
+                    fig.add_trace(go.Mesh3d(x=x, y=y, z=z, color=colors[i], opacity=0.5, name=f'box_{i}'))
+            else:
+                # Draw only edges of the box
+                x = [box[0, 0], box[1, 0], box[1, 0], box[0, 0], box[0, 0], box[0, 0], box[1, 0], box[1, 0], box[1, 0], box[0, 0], box[0, 0], box[1, 0]]
+                y = [box[0, 1], box[0, 1], box[1, 1], box[1, 1], box[0, 1], box[0, 1], box[0, 1], box[0, 1], box[1, 1], box[1, 1], box[1, 1], box[1, 1]]
+                z = [box[0, 2], box[0, 2], box[0, 2], box[0, 2], box[0, 2], box[1, 2], box[1, 2], box[1, 2], box[1, 2], box[1, 2], box[0, 2], box[0, 2]]
+                fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='lines', line=dict(color=colors[i]), name=f'box_{i}'))
 
     # Helper function to draw faces
     def draw_faces(faces, colors):
@@ -34,12 +66,19 @@ def draw_bfep(bbox=None, faces=None, edges=None, points=None):
             edge = edges[i]
             x, y, z = edge[:, 0], edge[:, 1], edge[:, 2]
             color = f'rgb({np.random.randint(0, 255)}, {np.random.randint(0, 255)}, {np.random.randint(0, 255)})'
-            fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='lines', line=dict(color=color, width=5), name=f'edge_{i}'))
+            # Calculate the middle index
+            mid_index = len(x) // 2
+            # Only display edge ID at the middle point of the edge if label is True
+            text = [''] * len(x)
+            if label:
+                text[mid_index] = f'E {i}'
+            fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='lines+text', line=dict(color=color, width=5), text=text, textposition="top center", name=f'edge_{i}'))
 
     # Helper function to draw points
     def draw_points(points):
         x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(color='black', size=5), name='points'))
+        text = [f'P {i}' for i in range(points.shape[0])] if label else None  # Display point ID if label is True
+        fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers+text', marker=dict(color='black', size=5), text=text, textposition="top center", name='points'))
 
     # Generate random colors for boxes and faces
     num_boxes = bbox.shape[0] if bbox is not None else faces.shape[0] if faces is not None else 0
@@ -136,7 +175,7 @@ def draw_labeled_points(wcs_pnts):
     pyo.plot(fig)
 
 
-def draw_edge(edge_wcs):
+def draw_edge(edge_wcs, save_name='temp-plot.html', auto_open=True):
     ne = edge_wcs.shape[0]
 
     # Create a list of colors, you can customize it as you want
@@ -170,7 +209,7 @@ def draw_edge(edge_wcs):
     )
 
     fig = go.Figure(data=data, layout=layout)
-    pyo.plot(fig)
+    pyo.plot(fig, filename=save_name, auto_open=auto_open)
 
 
 def draw_points(points, random_color=False):
@@ -217,7 +256,7 @@ def draw_points(points, random_color=False):
     pyo.plot(fig)
 
 
-def draw_ctrs(ctrs):
+def draw_face_ctrs(ctrs):
     """
     Draw multiple control grids with b batches of control points, their grid lines, and display IDs for each point.
 
@@ -292,138 +331,188 @@ def draw_ctrs(ctrs):
     pyo.plot(fig)
 
 
-def vis_step(path, num=10):
+def draw_edge_ctrs(ctrs):
     """
-    可视化 path 文件夹下所有 STEP 文件，一次显示 num 个文件。
+    Draw multiple edges with four control points each, display control points and connect them with lines.
 
-    参数：
-    - path: str，包含 STEP 文件的文件夹路径
-    - num: int，一次可视化的 STEP 文件数量
+    Args:
+    - ctrs (numpy.array): A b * 12-dimensional numpy array representing b edges,
+                          where each edge has 4 control points, and each point has x, y, z coordinates.
     """
-    # 初始化显示窗口
-    display, start_display, add_menu, add_function_to_menu = init_display()
+    b = ctrs.shape[0]  # Number of edges
+    assert ctrs.shape[1] == 12, "Each edge should have 12 values (4 control points with x, y, z coordinates)"
 
-    # 列出文件夹中的所有 STEP 文件
-    step_files = load_data_with_prefix(path, '.step')
-    # step_files.sort()  # 可选，按字母顺序排序
+    # Reshape the array into (b, 4, 3) where each edge has 4 control points with 3D coordinates
+    ctrs = ctrs.reshape(b, 4, 3)
 
-    # 每次展示 num 个文件
-    for i in range(0, len(step_files), num):
-        # 清除之前的显示
-        display.EraseAll()
+    # Define a color palette for different edges
+    color_palette = ['blue', 'green', 'red', 'orange', 'purple', 'cyan', 'magenta', 'yellow']
+    fig = go.Figure()
 
-        # 获取当前批次的 STEP 文件
-        batch_files = step_files[i:i + num]
+    for edge_idx in range(b):
+        # Extract the x, y, z coordinates of each control point for the current edge
+        x_points = ctrs[edge_idx, :, 0]
+        y_points = ctrs[edge_idx, :, 1]
+        z_points = ctrs[edge_idx, :, 2]
 
-        # 加载和显示每个文件
-        for step_file in batch_files:
+        color = color_palette[edge_idx % len(color_palette)]  # Choose color based on the edge index
+
+        # Add scatter plot for the control points with labels (IDs)
+        fig.add_trace(go.Scatter3d(
+            x=x_points,
+            y=y_points,
+            z=z_points,
+            mode='markers+text',
+            marker=dict(size=5, color=color),
+            text=[f'{i}' for i in range(4)],  # Add IDs as labels for each control point
+            textposition='top center',
+            name=f"Edge Control Points {edge_idx + 1}"
+        ))
+
+        # Connect the control points with a line to form the edge
+        fig.add_trace(go.Scatter3d(
+            x=x_points,
+            y=y_points,
+            z=z_points,
+            mode='lines',
+            line=dict(color=color, width=2),
+            name=f"Edge {edge_idx + 1}"
+        ))
+
+    # Set the layout for the 3D plot
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X Axis',
+            yaxis_title='Y Axis',
+            zaxis_title='Z Axis',
+        ),
+        title="Multiple Edges with Control Points and IDs",
+        showlegend=False
+    )
+
+    # Display the plot
+    pyo.plot(fig)
+
+
+def visualize_step(step_folder, num=200):
+    """
+    Visualize Step Files in batches with random colors
+    Args:
+        step_folder: path to the folder containing step files
+        num: number of step files to display per batch, default 100
+    """
+    # Get all step files
+    step_files = load_data_with_prefix(step_folder, '.step')
+    total_files = len(step_files)
+    total_batches = math.ceil(total_files / num)
+
+    for batch in range(total_batches):
+        display, start_display, add_menu, add_function_to_menu = init_display()
+
+        # Set white background
+        display.View.SetBackgroundColor(Quantity_Color(1, 1, 1, Quantity_TOC_RGB))
+
+        translation_step_x = 3
+        translation_step_y = 3
+        shapes_per_row = 10
+
+        current_offset_x = 0
+        current_offset_y = 0
+        shape_count = 0
+
+        # Calculate current batch file range
+        start_idx = batch * num
+        end_idx = min((batch + 1) * num, total_files)
+        current_batch_files = step_files[start_idx:end_idx]
+
+        for step_file in current_batch_files:
             step_reader = STEPControl_Reader()
-            filepath = os.path.join(path, step_file)
-            status = step_reader.ReadFile(filepath)
+            status = step_reader.ReadFile(step_file)
 
-            if status == 1:
-                print(f"无法读取文件 {step_file}")
-                continue
+            if status == IFSelect_RetDone:
+                step_reader.TransferRoots()
+                shape = step_reader.OneShape()
 
-            step_reader.TransferRoots()
-            shape = step_reader.Shape()
-            display.DisplayShape(shape, update=True)
+                translation = gp_Trsf()
+                translation.SetTranslation(gp_Vec(current_offset_x, current_offset_y, 0))
+                transformed_shape = BRepBuilderAPI_Transform(shape, translation).Shape()
 
-        # 更新显示窗口
+                # Generate random color and display shape
+                random_color = generate_random_color(min_rgb=0.2, max_rgb=0.8)
+                display.DisplayShape(
+                    transformed_shape,
+                    update=False,
+                    color=random_color
+                )
+
+                shape_count += 1
+                length = shape_count // shapes_per_row
+                if shape_count % shapes_per_row == 0:
+                    current_offset_x = -length * translation_step_x
+                    current_offset_y = length * translation_step_y
+                else:
+                    current_offset_x += translation_step_x
+                    current_offset_y += translation_step_y
+
         display.FitAll()
-        print(f"显示文件 {i + 1} 至 {min(i + num, len(step_files))}")
 
-        # 等待用户关闭窗口
+        # Display batch information
+        print(f"Displaying batch {batch + 1}/{total_batches} (Files {start_idx + 1} to {end_idx} of {total_files})")
+        print("Press 'q' to close current batch and continue to next batch...")
+
         start_display()
 
 
-"""Visulize Step File"""
-#
-# # 初始化显示器
-# display, start_display, add_menu, add_function_to_menu = init_display()
-#
-# # 创建STEP读取器
-# step_reader = STEPControl_Reader()
-#
-# # 加载STEP文件
-# step_file = 'samples/test_ef/eval/test_ef_05/2zPAZRfIxsTyvQX_0.step'  # 替换为你要加载的STEP文件路径
-# status = step_reader.ReadFile(step_file)
-#
-# # 确保文件成功读取
-# if status == IFSelect_RetDone:
-#     step_reader.TransferRoots()
-#     shape = step_reader.OneShape()
-#     display.DisplayShape(shape, update=True)
-# else:
-#     print("Error: Failed to read the STEP file.")
-#
-# # 启动显示窗口
-# start_display()
+def generate_random_color(min_rgb=0.2, max_rgb=0.8):
+    """
+    Generate random RGB color within specified range to avoid too dark or too bright colors
+    Args:
+        min_rgb: minimum RGB value (0-1)
+        max_rgb: maximum RGB value (0-1)
+    Returns:
+        Quantity_Color: Random color object
+    """
+    return Quantity_Color(
+        min_rgb + random.random() * (max_rgb - min_rgb),
+        min_rgb + random.random() * (max_rgb - min_rgb),
+        min_rgb + random.random() * (max_rgb - min_rgb),
+        Quantity_TOC_RGB
+    )
 
 
-# """Visulize Stl File"""
-# import open3d as o3d
-# import numpy as np
-#
-# # STL文件路径列表
-# stl_files = [
-#     "comparison/point_cloud/furniture/bed/bed_YI5Gq16WRM.stl",
-#     "comparison/point_cloud/furniture/bench/bench_OiThAgBD4B.stl",
-#     "comparison/point_cloud/furniture/chair/chair_9azOyb3elZ.stl",
-#     "comparison/point_cloud/furniture/couch/couch_cLRwqUuX7x.stl",
-#     "comparison/point_cloud/furniture/sofa/sofa_gVP8WMC2DL.stl",
-#     "comparison/point_cloud/furniture/table/table_nz6MRe5tlP.stl"
-# ]
-#
-# # 平移向量列表，每个物体将沿X轴依次平移
-# translations = 1.5*np.array([
-#     [0, 0, 0],  # 第一个物体不平移
-#     [2, 0, 0],  # 第二个物体沿X轴平移2个单位
-#     [4, 0, 0],  # 第三个物体沿X轴平移4个单位
-#     [6, 0, 0],  # 第四个物体沿X轴平移6个单位
-#     [8, 0, 0],  # 依次类推
-#     [10, 0, 0],
-# ])
-#
-# # 创建一个可视化窗口
-# vis = o3d.visualization.Visualizer()
-# vis.create_window()
-#
-# # 设置背景为白色
-# opt = vis.get_render_option()
-# opt.background_color = np.asarray([1, 1, 1])  # RGB: 白色
-#
-# # 生成绕z轴逆时针旋转90度的旋转矩阵
-# rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, np.pi / 2])
-#
-# # 循环读取并添加每个STL文件到场景中
-# for i, stl_file in enumerate(stl_files):
-#     # 读取STL文件
-#     mesh = o3d.io.read_triangle_mesh(stl_file)
-#
-#     # 确保法向量已计算
-#     mesh.compute_vertex_normals()
-#
-#     # 为每个网格设置相同的灰色
-#     mesh.paint_uniform_color(np.random.rand(3))
-#
-#     # 对物体进行平移和旋转
-#     translation = translations[i]
-#     mesh.translate(translation)
-#     mesh.rotate(rotation_matrix)
-#
-#     # 添加网格到场景
-#     vis.add_geometry(mesh)
-#
-# # 更新并显示
-# vis.poll_events()
-# vis.update_renderer()
-#
-# # 运行可视化
-# vis.run()
-#
-# # 销毁窗口
-# vis.destroy_window()
+def visualize_stl(stl_dir, num=100):
+
+    stl_files = [os.path.join(stl_dir, f) for f in os.listdir(stl_dir) if f.endswith('.stl')]
+    num_files = len(stl_files)
+
+    for batch_start in range(0, num_files, num):
+        batch_files = stl_files[batch_start:batch_start + num]
+
+        translations = 1.5 * np.array([[2 * (i % 10), 2 * (i // 10), 0] for i in range(len(batch_files))])
+
+        vis = o3d.visualization.Visualizer()
+        vis.create_window()
+
+        opt = vis.get_render_option()
+        opt.background_color = np.asarray([1, 1, 1])
+
+        rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, np.pi / 2])
+
+        for i, stl_file in enumerate(batch_files):
+            mesh = o3d.io.read_triangle_mesh(stl_file)
+            mesh.compute_vertex_normals()
+            mesh.paint_uniform_color(np.random.rand(3))
+
+            translation = translations[i]
+            mesh.translate(translation)
+            mesh.rotate(rotation_matrix)
+
+            vis.add_geometry(mesh)
+
+        vis.poll_events()
+        vis.update_renderer()
+        vis.run()
+        vis.destroy_window()
 
 
 def main():
@@ -431,4 +520,5 @@ def main():
 
 
 if __name__ == '__main__':
-    vis_step(path='samples/Transformer_2000')
+    # visualize_step('/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/Ours/')
+    visualize_stl('/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/reference_train/0092')

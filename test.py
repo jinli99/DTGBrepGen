@@ -1,9 +1,29 @@
+import sys
+from collections import Counter
 import yaml
+import os
+import shutil
 import torch.multiprocessing as mp
+from tqdm import tqdm
+import pickle
+import numpy as np
+from OCC.Extend.DataExchange import write_step_file, write_stl_file
+from inference.brepBuild import sample_bspline_curve, create_bspline_curve, joint_optimize, construct_brep
+from OCC.Core.STEPControl import STEPControl_Reader
+from OCC.Core.TopAbs import TopAbs_FACE
+from OCC.Core.TopExp import TopExp_Explorer
+from OCC.Core.BRep import BRep_Tool
+from OCC.Core.GeomAbs import (
+    GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
+    GeomAbs_Sphere, GeomAbs_Torus, GeomAbs_BezierSurface,
+    GeomAbs_BSplineSurface, GeomAbs_SurfaceOfRevolution,
+    GeomAbs_SurfaceOfExtrusion, GeomAbs_OffsetSurface,
+    GeomAbs_OtherSurface
+)
+from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+from utils import load_data_with_prefix
 
 
-#
-#
 # def read_step_file(step_file_path):
 #     reader = STEPControl_Reader()
 #     status = reader.ReadFile(step_file_path)
@@ -63,9 +83,82 @@ import torch.multiprocessing as mp
 # print(face_type_count)
 
 
+def get_surface_type(surface_type):
+    """Convert GeomAbs surface type to string"""
+    types = {
+        GeomAbs_Plane: "Plane",
+        GeomAbs_Cylinder: "Cylinder",
+        GeomAbs_Cone: "Cone",
+        GeomAbs_Sphere: "Sphere",
+        GeomAbs_Torus: "Torus",
+        GeomAbs_BezierSurface: "Bezier",
+        GeomAbs_BSplineSurface: "BSpline",
+        GeomAbs_SurfaceOfRevolution: "Revolution",
+        GeomAbs_SurfaceOfExtrusion: "Extrusion",
+        GeomAbs_OffsetSurface: "Offset",
+        GeomAbs_OtherSurface: "Other"
+    }
+    return types.get(surface_type, "Unknown")
+
+
+def analyze_step_file_faces(step_file_path):
+    """
+    Analyze and print surface type for each face in a STEP file
+    Args:
+        step_file_path: path to the STEP file
+    """
+    # Read STEP file
+    reader = STEPControl_Reader()
+    reader.ReadFile(step_file_path)
+    reader.TransferRoots()
+    shape = reader.OneShape()
+
+    # Explore faces
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    face_index = 1
+
+    while explorer.More():
+        face = explorer.Current()
+
+        # Get surface type
+        surf = BRepAdaptor_Surface(face)
+        surface_type = get_surface_type(surf.GetType())
+
+        print(f"Face {face_index}: {surface_type}")
+
+        face_index += 1
+        explorer.Next()
+
+
+def count_faces_in_step(filepath):
+    """加载一个STEP文件并统计面数量。"""
+    step_reader = STEPControl_Reader()
+    status = step_reader.ReadFile(filepath)
+    if status != 1:
+        print(f"Failed to load {filepath}")
+        return None
+
+    step_reader.TransferRoots()
+    shape = step_reader.OneShape()
+
+    # 统计面数量
+    face_count = 0
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        face_count += 1
+        explorer.Next()
+    return face_count
+
+
+def last():
+    with open('/home/jing/PythonProjects/BrepGDM/Pics/Srcs/vis_overview/table_SP6URjYZo8.pkl', 'rb') as f:
+        data = pickle.load(f)
+    solid = construct_brep(data['edge_wcs'], data['faceEdge_adj'], data['edgeVert_adj'])
+    write_step_file(solid, 'jing.step')
+
+
 def main():
-    # test_files = ['data_process/GeomDatasets/deepcad_parsed/0007/00070019_9321559d3d404be585a05ab2_step_003.pkl',
-    #               'data_process/GeomDatasets/deepcad_parsed/0012/00120032_e7e0b2ca270f985feb34bccb_step_000.pkl']
+    # test_files = ['00638827_fcef2331e2f6a654e9365b06_step_000.pkl']
     # for file in tqdm(test_files):
     #     with open(file, 'rb') as f:
     #         data = pickle.load(f)
@@ -88,9 +181,7 @@ def main():
     #             print('B-rep rebuild failed...')
     #             continue
     #
-    #         parts = file.split('/')
-    #         result = f"{parts[-2]}_{parts[-1]}"
-    #         save_name = result[:-4]
+    #         save_name = file[:-4]
     #         write_step_file(solid, f'samples/{save_name}.step')
     #         write_stl_file(solid, f'samples/{save_name}.stl', linear_deflection=0.001, angular_deflection=0.5)
 
@@ -123,14 +214,25 @@ def main():
     #         valid += 1
     # print(valid)
 
-    with open('config.yaml', 'r') as file:
-        config = yaml.safe_load(file)
+    # step_file = "/home/jing/PythonProjects/BrepGDM/samples/deepcad_results/test_edge/0034_00349931_d3200ad7e4b39853237b1471_step_022.step"
+    # print(f"Analyzing surface types for each face in: {step_file}")
+    # print("-" * 50)
+    # analyze_step_file_faces(step_file)
 
-    # 根据 dataset_name 获取对应的参数
-    # dataset_config = config['datasets'].get(dataset_name)
-    print(1)
+    """统计多个STEP文件中的面数量分布。"""
+    step_files = load_data_with_prefix('/home/jing/PythonProjects/BrepGDM/comparison/datas/abc/BrepGen_3500/', '.step')
+    face_counts = []
+    for filepath in tqdm(step_files):
+        face_count = count_faces_in_step(filepath)
+        if face_count is not None:
+            face_counts.append(face_count)
+    distribution = Counter(face_counts)
+    for num_faces, count in sorted(distribution.items()):
+        print(f"{num_faces} faces: {count} file(s)")
 
 
 if __name__ == "__main__":
     mp.set_start_method('spawn')
-    main()
+    # main()
+
+    last()

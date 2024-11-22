@@ -1,8 +1,10 @@
 import os
 import pickle
+import random
+from itertools import groupby
+from itertools import chain
 import numpy as np
 import torch
-from itertools import chain
 from topology.datasets import opposite_idx
 from typing import List
 from collections import defaultdict
@@ -383,6 +385,8 @@ def test_valid(args):
 
     topo_unique = np.array(0)
 
+    diversity = {}
+
     def topo_generate(path, topo_unique):
         with open(path, 'rb') as f:
             data = pickle.load(f)
@@ -404,21 +408,62 @@ def test_valid(args):
             generator = SeqGenerator(data['edgeFace_adj'])
             if generator.generate(model, class_label):
                 print("Construct Brep Topology succeed at time %d!" % try_time)
+                diversity[os.path.basename(path)[:-4]] = generator.topo_seq
                 if generator.topo_seq != list(chain.from_iterable(sublist + [-2] for sublist in data['topo_seq'])):
                     topo_unique += 1
                 model.clear_cache()
                 return 1
+        diversity[os.path.basename(path)[:-4]] = None
         print("Construct Brep Topology Failed!")
         model.clear_cache()
         return 0
 
     files = load_data_with_prefix(args.test_path, '.pkl')
+    files = random.sample(files, 100) if len(files) > 100 else files
 
     valid = 0
     for file in tqdm(files):
         valid += topo_generate(file, topo_unique)
 
     print(valid, topo_unique)
+
+    return diversity
+
+
+def sort_list(sub_list):
+    if len(sub_list) <= 2:
+        return sub_list
+    if sub_list[1] <= sub_list[-1]:
+        return sub_list
+    else:
+        return sub_list[:1] + sub_list[1:][::-1]
+
+
+def compute_diversity():
+
+    unique_values_dict = {}
+    valid_values_dict = {}
+
+    for i in range(20):
+        file_path = f'topo_diversity/deepcad-{i}.pkl'
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+            for key, value in data.items():
+                if key not in unique_values_dict:
+                    unique_values_dict[key] = set()
+                    valid_values_dict[key] = 0
+                if value is not None:
+                    value = [x for x in value if x != -2]
+                    value = [list(group) for key, group in groupby(value, lambda x: x == -1) if not key]
+                    value = [sort_list(x) for x in value]
+                    value = list(chain.from_iterable(value))
+                    unique_values_dict[key].add(tuple(value))
+                    valid_values_dict[key] += 1
+
+    unique_counts = [len(values) for _, values in unique_values_dict.items()]
+    valid_counts = [values for _, values in valid_values_dict.items()]
+    xx = [i/j for i, j in zip(unique_counts, valid_counts)]
+    print(sum(xx)/len(xx))
 
 
 def topo_sample(args):
@@ -448,7 +493,7 @@ def topo_sample(args):
     edgeVert_model = edgeVert_model.to(device).eval()
 
     valid = 0
-    for _ in tqdm(range(0, num_sample, batch), desc='Processing Samples', total=(num_sample // batch)):
+    for k in tqdm(range(0, num_sample, batch), desc='Processing Samples', total=(num_sample // batch)):
 
         with torch.no_grad():
 
@@ -481,6 +526,10 @@ def topo_sample(args):
                     generator = SeqGenerator(edgeFace_adj.cpu().numpy())
                     if generator.generate(edgeVert_model, class_label[[i]] if class_label is not None else None):
                         print("Construct Brep Topology succeed at time %d!" % try_time)
+
+                        # with open(f'samples/topo/abc/{k+i}.pkl', 'wb') as f:
+                        #     pickle.dump(generator.topo_seq, f)
+
                         edgeVert_model.clear_cache()
                         valid += 1
                         break
@@ -499,10 +548,22 @@ if __name__ == '__main__':
 
     # ====================Test EdgeVert Model=================================
     # config['test_path'] = os.path.join('data_process/TopoDatasets', name, 'test')
-    # config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_100.pt')
+    # config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_200.pt')
     # test_valid(args=Namespace(**config))
 
     # ====================Test Topology Model=================================
     config['faceEdge_path'] = os.path.join('checkpoints', name, 'topo_faceEdge/epoch_1000.pt')
-    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_1000.pt')
+    config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_200.pt')
     topo_sample(args=Namespace(**config))
+
+    # ====================Test Topology Diversity=================================
+    # config['test_path'] = os.path.join('data_process/TopoDatasets', name, 'test')
+    # config['edgeVert_path'] = os.path.join('checkpoints', name, 'topo_edgeVert/epoch_500.pt')
+    # files = load_data_with_prefix(config['test_path'], '.pkl')
+    # files = random.sample(files, 100) if len(files) > 100 else files
+    # for kk in range(0, 20):
+    #     diversity_ = test_valid(args=Namespace(**config))
+    #     with open(os.path.join('topo_diversity', name+'-'+str(kk)+'.pkl'), 'wb') as ff:
+    #         pickle.dump(diversity_, ff)
+
+    # compute_diversity()

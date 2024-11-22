@@ -10,6 +10,7 @@ from tqdm import tqdm
 from chamferdist import ChamferDistance
 from contextlib import contextmanager
 from typing import Optional
+from concurrent.futures import ProcessPoolExecutor
 from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface, GeomAPI_PointsToBSpline, GeomAPI_ProjectPointOnSurf
 from OCC.Core.GeomAbs import GeomAbs_C2
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeWire, BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakeEdge
@@ -26,11 +27,13 @@ from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.TColStd import TColStd_Array1OfReal, TColStd_Array1OfInteger
 from OCC.Core.Geom import (Geom_BSplineSurface, Geom_BSplineCurve, Geom_Plane,
                            Geom_SphericalSurface, Geom_CylindricalSurface, Geom_ConicalSurface)
+from OCC.Core.GeomConvert import GeomConvert_ApproxSurface
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.GCPnts import GCPnts_UniformAbscissa
 from utils import load_data_with_prefix
 from inference.primitive_fitting import process_one_surface
 from topology.transfer import face_edge_trans
+from comparison.metrics import check_brep_validity
 
 
 class Brep2Mesh:
@@ -431,7 +434,6 @@ def fit_basic_surface(outer_points):
         assert False
 
 
-from concurrent.futures import ProcessPoolExecutor
 def fit_surface(face_id, edge_wcs, FaceEdgeAdj):
     out = fit_basic_surface(outer_points=edge_wcs[FaceEdgeAdj[face_id]])
     return out
@@ -638,6 +640,9 @@ def construct_brep(edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     maker.Add(sewn_shell)
     maker.Build()
     solid = maker.Solid()
+
+    if not check_brep_validity(solid):
+        return None
 
     return solid
 

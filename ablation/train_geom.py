@@ -2,34 +2,30 @@ import argparse
 import os.path
 import yaml
 import wandb
-from geometry.datasets import FaceBboxData, FaceGeomData, VertGeomData, EdgeGeomData
-from geometry.trainers import FaceBboxTrainer, FaceGeomTrainer, VertGeomTrainer, EdgeGeomTrainer
+from ablation.datasets import FaceGeomData, EdgeGeomData
+from ablation.trainers import FaceGeomTrainer, EdgeGeomTrainer
 
 
 def get_args_geom():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--name', type=str, default='furniture',
+    parser.add_argument('--name', type=str, default='deepcad',
                         choices=['furniture', 'deepcad', 'abc'])
-    parser.add_argument('--face_vae', type=str, default='checkpoints/furniture/vae_face/epoch_400.pt',
-                        help='Path to pretrained surface vae weights')
-    parser.add_argument('--edge_vae', type=str, default='checkpoints/furniture/vae_edge/epoch_400.pt',
-                        help='Path to pretrained edge vae weights')
     parser.add_argument("--option", type=str, choices=[
-        'faceBbox', 'faceGeom', 'vertGeom', 'edgeGeom'], default='faceGeom')
-    parser.add_argument("--extract_type", type=str, choices=['cycles', 'eigenvalues', 'all'], default='all',
-                        help="Graph feature extraction type (default: all)")
+        'faceGeom', 'edgeGeom'], default='edgeGeom')
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=512, help='input batch size')
     parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
-    parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
-    parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
+    parser.add_argument('--save_epochs', type=int, default=100, help='number of epochs to save model')
+    parser.add_argument('--dir_name', type=str, default="checkpoints/ablation", help='name of the log folder.')
 
     args = parser.parse_args()
+    args.face_vae = os.path.join('checkpoints/ablation', args.name, 'vae_face.pt')
+    args.edge_vae = os.path.join('checkpoints/ablation', args.name, 'vae_edge.pt')
     args.data = os.path.join('data_process/GeomDatasets', args.name+'_parsed')
     args.train_list = os.path.join('data_process', args.name+'_data_split_6bit.pkl')
-    args.env = args.name+'_geom_'+args.option
+    args.env = args.name+'_ablation_'+args.option
     args.save_dir = os.path.join(args.dir_name, args.env.split('_', 1)[0], args.env.split('_', 1)[1])
 
     return args
@@ -50,15 +46,7 @@ def main():
         os.makedirs(args.save_dir)
 
     # Initialize dataset loader and trainer
-    if args.option == 'faceBbox':
-        train_dataset = FaceBboxData(args=args, validate=False)
-        val_dataset = FaceBboxData(args=args, validate=True)
-        gdm = FaceBboxTrainer(args, train_dataset, val_dataset)
-    elif args.option == 'vertGeom':
-        train_dataset = VertGeomData(args=args, validate=False)
-        val_dataset = VertGeomData(args=args, validate=True)
-        gdm = VertGeomTrainer(args, train_dataset, val_dataset)
-    elif args.option == 'edgeGeom':
+    if args.option == 'edgeGeom':
         train_dataset = EdgeGeomData(args=args, validate=False)
         val_dataset = EdgeGeomData(args=args, validate=True)
         gdm = EdgeGeomTrainer(args, train_dataset, val_dataset)
@@ -72,7 +60,7 @@ def main():
     print('Start training...')
 
     # Initialize wandb
-    os.environ["WANDB_MODE"] = "offline"
+    # os.environ["WANDB_MODE"] = "offline"
     wandb.init(project='BrepGDM', dir=args.save_dir, name=args.env)
 
     # Main training loop

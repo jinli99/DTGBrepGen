@@ -8,13 +8,13 @@ from topology.trainers import EdgeVertTrainer, FaceEdgeTrainer
 
 def get_args_topo():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', type=str, default='deepcad',
+    parser.add_argument('--name', type=str, default='furniture',
                         choices=['furniture', 'deepcad', 'abc'])
     parser.add_argument('--batch_size', type=int, default=16, help='input batch size')
     parser.add_argument("--option", type=str, choices=['faceEdge', 'edgeVert'], default='edgeVert')
-    parser.add_argument('--train_epochs', type=int, default=3000, help='number of epochs to train for')
+    parser.add_argument('--train_epochs', type=int, default=2000, help='number of epochs to train for')
     parser.add_argument('--test_epochs', type=int, default=50, help='number of epochs to test model')
-    parser.add_argument('--save_epochs', type=int, default=500, help='number of epochs to save model')
+    parser.add_argument('--save_epochs', type=int, default=200, help='number of epochs to save model')
     parser.add_argument('--dir_name', type=str, default="checkpoints", help='name of the log folder.')
     args = parser.parse_args()
     args.env = args.name+'_topo_'+args.option
@@ -46,9 +46,9 @@ def main():
     else:
         assert args.option == 'edgeVert'
         train_dataset = EdgeVertDataset(os.path.join('data_process/TopoDatasets', args.name, 'train'), args)
-        # print(train_dataset.max_seq_length, train_dataset.max_num_edge)
+        # print(train_dataset.max_seq_length, train_dataset.max_num_edge_topo)
         val_dataset = EdgeVertDataset(os.path.join('data_process/TopoDatasets', args.name, 'test'), args)
-        # print(val_dataset.max_seq_length, train_dataset.max_num_edge)
+        # print(val_dataset.max_seq_length, train_dataset.max_num_edge_topo)
         topo = EdgeVertTrainer(args, train_dataset, val_dataset)
 
     # Main training loop

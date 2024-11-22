@@ -6,7 +6,7 @@ furniture:
   threshold: 0.05
   bbox_scaled: 3
   z_scaled: 1
-  data_aug: False
+  data_aug: True
   use_cf: True
   use_pc: False
 
@@ -40,12 +40,17 @@ furniture:
     hidden_dims:
       dx: 512
       de: 256
-      n_head': 8
-      dim_ffX': 512
+      n_head: 8
+      dim_ffX: 512
     n_layers: 8
   EdgeGeomModel:
     n_layers: 8
     edge_geom_dim: 12
+    d_model: 768
+    nhead: 12
+  FaceGeomModel:
+    n_layers: 8
+    face_geom_dim: 48
     d_model: 768
     nhead: 12
 
@@ -100,5 +105,64 @@ deepcad:
     edge_geom_dim: 12
     d_model: 768
     nhead: 12
+  FaceGeomModel:
+    n_layers: 8
+    face_geom_dim: 48
+    d_model: 768
+    nhead: 12
 
 abc:
+  # general setting
+  max_face: 30
+  max_edge: 20
+  edge_classes: 5
+  threshold: 0.05
+  bbox_scaled: 3
+  z_scaled: 1
+  data_aug: True
+  use_cf: False
+  use_pc: False
+
+  # dataset information
+  max_num_edge: 180
+  max_vert: 121
+  max_vertFace: 15
+  max_seq_length: 474
+  max_num_edge_topo: 180
+
+  # model network
+  FaceEdgeModel:
+    d_model: 128
+    nhead: 4
+    n_layers: 4
+  EdgeVertModel:
+    d_model: 256
+    n_layers: 4
+  FaceBboxModel:
+    hidden_mlp_dims:
+      x: 256
+    hidden_dims:
+      dx: 768
+      de: 256
+      n_head: 12
+      dim_ffX: 512
+    n_layers: 8
+  VertGeomModel:
+    hidden_mlp_dims:
+      x: 256
+    hidden_dims:
+      dx: 512
+      de: 256
+      n_head: 8
+      dim_ffX: 512
+    n_layers: 8
+  EdgeGeomModel:
+    n_layers: 8
+    edge_geom_dim: 12
+    d_model: 768
+    nhead: 12
+  FaceGeomModel:
+    n_layers: 8
+    face_geom_dim: 48
+    d_model: 768
+    nhead: 12

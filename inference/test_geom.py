@@ -11,7 +11,7 @@ from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer
 from utils import check_step_ok, sort_bbox_multi
 from OCC.Extend.DataExchange import write_step_file
 from inference.brepBuild import Brep2Mesh
-from inference.generate import get_brep, get_faceBbox, get_vertGeom, get_edgeGeom, text2int
+from inference.generate_noface import get_brep, get_faceBbox, get_vertGeom, get_edgeGeom, text2int, process_batch
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -31,7 +31,7 @@ def get_ok_step(batch_size, mode='test', dataset_name='deepcad'):
     while len(batch_file) < batch_size and datas:
         file = datas.pop(0)
         with open(os.path.join('data_process/GeomDatasets', dataset_name+'_parsed', file), 'rb') as tf:
-            if check_step_ok(pickle.load(tf)):
+            if check_step_ok(pickle.load(tf), max_face=30, max_edge=20):
                 batch_file.append(file)
 
     return batch_file
@@ -74,7 +74,7 @@ def get_topology(files, device, dataset_name):
 def main(args):
 
     # dataset_name = 'deepcad'
-    # test_files = get_ok_step(1200, mode='test', dataset_name=dataset_name)
+    # test_files = get_ok_step(500, mode='test', dataset_name=dataset_name)
     # with open(os.path.join('inference', dataset_name+'_test.pkl'), 'wb') as f:
     #     pickle.dump(test_files, f)
     # return
@@ -97,7 +97,7 @@ def main(args):
     FaceBbox_model = FaceBbox_model.to(device).eval()
 
     # Initial VertGeomTransformer
-    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layer'],
+    vertGeom_model = VertGeomTransformer(n_layers=args.VertGeomModel['n_layers'],
                                          hidden_mlp_dims=args.VertGeomModel['hidden_mlp_dims'],
                                          hidden_dims=args.VertGeomModel['hidden_dims'],
                                          act_fn_in=torch.nn.ReLU(),
@@ -133,10 +133,10 @@ def main(args):
         clip_sample_range=3
     )
 
-    with open('furniture_test.pkl', 'rb') as f:
+    with open(os.path.join('inference', args.name+'_test.pkl'), 'rb') as f:
         batch_file = pickle.load(f)
 
-    # batch_file = ['chair/partstudio_partstudio_0104.pkl']
+    # batch_file = ['0003/00030362_8ff9449eccc64885baa58838_step_004.pkl']*4
 
     b_each = 16 if args.name == 'furniture' else 32
 
@@ -152,7 +152,7 @@ def main(args):
                                                                                     datas["vertFace_adj"])
         b = len(fef_adj)
 
-        if args.cf:
+        if args.use_cf:
             class_label = [text2int[i.split('_')[0]] for i in datas['name']]
         else:
             class_label = None
@@ -176,18 +176,10 @@ def main(args):
         edge_geom = [i[j] for i, j in zip(edge_geom, edge_mask)]                 # [ne*12, ...]
 
         # =======================================Construct Brep================================================== #
-        for j in range(b):
-            solid = get_brep((face_bbox[j].cpu().numpy() / args.bbox_scaled,
-                              vert_geom[j].cpu().numpy() / args.bbox_scaled,
-                              edge_geom[j].cpu().numpy() / args.bbox_scaled,
-                              edgeFace_adj[j].cpu().numpy(),
-                              edgeVert_adj[j].cpu().numpy(),
-                              faceEdge_adj[j]))
-
-            if solid is False:
-                continue
-            save_name = datas['name'][j]
-            write_step_file(solid, f'{args.save_folder}/{save_name}.step')
+        success_count = process_batch(face_bbox, vert_geom, edge_geom,
+                                      edgeFace_adj, edgeVert_adj, faceEdge_adj,
+                                      args, class_label)
+        print(f"Successfully processed {success_count} items out of {b}")
 
     print('write stl...')
     mesh_tool = Brep2Mesh(input_path=args.save_folder)
@@ -197,12 +189,15 @@ def main(args):
 if __name__ == '__main__':
     mp.set_start_method('spawn')
 
-    name = 'deepcad'
+    name = 'furniture'
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
     config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
     config['faceBbox_path'] = os.path.join('checkpoints', name, 'geom_faceBbox/epoch_3000.pt')
     config['save_folder'] = os.path.join('samples', name)
+    # config['save_folder'] = os.path.join('bug')
+    config['name'] = name
+    config['parallel'] = True
 
     main(args=Namespace(**config))

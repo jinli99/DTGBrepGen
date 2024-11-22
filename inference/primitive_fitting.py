@@ -959,6 +959,16 @@ def process_one_surface(points, device, weights=None, face_id=0):
     cylinder_err = recon_basic_shapes["cylinder_err"]
     cone_err = 100
 
+    if recon_basic_shapes['sphere_params'][1] > 1.7 or plane_err < 1e-3:
+        sphere_err = np.inf
+    elif len(visualize_basic_mesh("sphere", points, recon_basic_shapes, device=device).vertices) == 0:
+        sphere_err = np.inf
+
+    if recon_basic_shapes['cylinder_params'][2] > 1.7 or plane_err < 1e-3:
+        cylinder_err = np.inf
+    elif len(visualize_basic_mesh("cylinder", points, recon_basic_shapes, device=device).vertices) == 0:
+        cylinder_err = np.inf
+
     # if (
     #     visualize_basic_mesh("cone", points, recon_basic_shapes, device=device)
     #     is None
@@ -978,30 +988,30 @@ def process_one_surface(points, device, weights=None, face_id=0):
     # else:
     #     if recon_basic_shapes["cone_params"][2] >= 1.53:
     #         cone_err = np.inf
-    if (
-            len(
-                visualize_basic_mesh(
-                    "cylinder", points, recon_basic_shapes, device=device
-                ).vertices
-            )
-            == 0
-    ):
-        cylinder_err = np.inf
-    if (
-            len(
-                visualize_basic_mesh(
-                    "sphere", points, recon_basic_shapes, device=device
-                ).vertices
-            )
-            == 0
-    ):
-        sphere_err = np.inf
+    # if (
+    #         len(
+    #             visualize_basic_mesh(
+    #                 "cylinder", points, recon_basic_shapes, device=device
+    #             ).vertices
+    #         )
+    #         == 0
+    # ):
+    #     cylinder_err = np.inf
+    # if (
+    #         len(
+    #             visualize_basic_mesh(
+    #                 "sphere", points, recon_basic_shapes, device=device
+    #             ).vertices
+    #         )
+    #         == 0
+    # ):
+    #     sphere_err = np.inf
 
     sorted_shape_indices = np.argsort([plane_err, sphere_err, cylinder_err, cone_err])
     pred_shape = sorted_shape_indices[0]
 
     out = {}
-    if pred_shape == 0:  # plane
+    if pred_shape == 0 or plane_err < 1e-3:  # plane
         out['type'] = 'plane'
         out['params'] = recon_basic_shapes['plane_params']
         out['err'] = recon_basic_shapes['plane_err']

@@ -6,14 +6,13 @@ import torch.multiprocessing as mp
 from argparse import Namespace
 from tqdm import tqdm
 from diffusers import DDPMScheduler, PNDMScheduler
-from model import FaceGeomTransformer, EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer, FaceEdgeModel, EdgeVertModel
+from model import EdgeGeomTransformer, VertGeomTransformer, FaceBboxTransformer, FaceEdgeModel, EdgeVertModel
 from topology.topoGenerate import SeqGenerator
 from topology.transfer import faceVert_from_edgeVert, face_vert_trans, fef_from_faceEdge
 from utils import xe_mask, pad_zero, sort_bbox_multi, generate_random_string, make_mask, pad_and_stack, calculate_y
 from OCC.Extend.DataExchange import write_step_file
 from visualization import *
-from inference.brepBuild import (Brep2Mesh, sample_bspline_curve, sample_bspline_surface, create_bspline_curve,
-                                 create_bspline_surface, joint_optimize, construct_brep)
+from brepBuild import Brep2Mesh, sample_bspline_curve, create_bspline_curve, joint_optimize, construct_brep
 from topology.transfer import *
 import multiprocessing
 from functools import partial
@@ -39,7 +38,7 @@ text2int = {'uncond':0,
 int2text = {v: k for k, v in text2int.items()}
 
 
-def get_topology(batch, faceEdge_model, edgeVert_model, device, labels):
+def get_topology(files, edgeVert_model, device, dataset_name):
     """****************Brep Topology****************"""
     edgeVert_adj = []
     edgeFace_adj = []
@@ -49,15 +48,23 @@ def get_topology(batch, faceEdge_model, edgeVert_model, device, labels):
 
     valid = 0
 
+    labels = None
+
     if labels is not None:
         class_label = torch.LongTensor(labels).to(device).reshape(-1, 1)
     else:
         class_label = None
     fail_idx = []
 
+    adj_batch = []
+    for i in files:
+        with open(os.path.join('data_process/GeomDatasets', dataset_name+'_parsed', i), 'rb') as tf:
+            data = pickle.load(tf)
+            adj_batch.append(torch.from_numpy(data['fef_adj']).to(device))
+
     with torch.no_grad():
 
-        adj_batch = faceEdge_model.sample(num_samples=batch, class_label=class_label)              # b*nf*nf
+        batch = len(adj_batch)
 
         for i in tqdm(range(batch)):
             adj = adj_batch[i]                                                                     # nf*nf
@@ -102,9 +109,6 @@ def get_topology(batch, faceEdge_model, edgeVert_model, device, labels):
             vertFace_adj.append(vf_adj)
             fef = fef_from_faceEdge(edgeFace_adj=ef_adj.cpu().numpy())
             fef_adj.append(torch.from_numpy(fef).to(device))
-
-    if labels is not None:
-        labels = [labels[i] for i in range(len(class_label)) if i not in fail_idx]
 
     print(valid)
 
@@ -357,8 +361,8 @@ def get_edgeGeom(face_bbox, vert_geom, edgeFace_adj, edgeVert_adj, model, pndm_s
 
 
 def get_brep(args, save_name=None):
-    # nf*48, nf*6, nv*3, ne*12, nf*48, ne*2, ne*2, List[List[int]]
-    face_bbox, vert_geom, edge_geom, face_geom, edgeFace_adj, edgeVert_adj, faceEdge_adj = args
+    # nf*48, nf*6, nv*3, ne*12, ne*2, ne*2, List[List[int]]
+    face_bbox, vert_geom, edge_geom, edgeFace_adj, edgeVert_adj, faceEdge_adj = args
 
     assert set(range(face_bbox.shape[0])) == set(np.unique(edgeFace_adj.reshape(-1)).tolist())
     assert set(range(vert_geom.shape[0])) == set(np.unique(edgeVert_adj.reshape(-1)).tolist())
@@ -369,22 +373,13 @@ def get_brep(args, save_name=None):
         edge_ncs.append(pcd)
     edge_ncs = np.stack(edge_ncs)  # ne*32*3
 
-    face_ncs = []
-    for ctrs in face_geom:
-        pcd = sample_bspline_surface(create_bspline_surface(ctrs.reshape(16, 3).astype(np.float64)))  # 32*32*3
-        face_ncs.append(pcd)
-    face_ncs = np.stack(face_ncs)
-
     # joint_optimize
-    edge_wcs = joint_optimize(edge_ncs, face_ncs, face_bbox, vert_geom, edgeVert_adj, faceEdge_adj, len(edge_ncs), len(face_bbox))
+    edge_wcs = joint_optimize(edge_ncs, face_bbox, vert_geom, edgeVert_adj, faceEdge_adj, len(edge_ncs), len(face_bbox))
 
     try:
         solid = construct_brep(edge_wcs, faceEdge_adj, edgeVert_adj)
-        if solid is None:
-            print('B-rep rebuild failed...')
-            return False
-        # if save_name is not None:
-        #     draw_edge(edge_wcs, save_name=save_name+'.html', auto_open=False)
+        if save_name is not None:
+            draw_edge(edge_wcs, save_name=save_name+'.html', auto_open=False)
     except Exception as e:
         print('B-rep rebuild failed...')
         return False
@@ -393,7 +388,7 @@ def get_brep(args, save_name=None):
 
 
 def process_single_item(data_tuple, save_folder, bbox_scaled):
-    j, face_bbox_j, vert_geom_j, edge_geom_j, face_geom_j, edgeFace_adj_j, edgeVert_adj_j, faceEdge_adj_j, class_label_j = data_tuple
+    j, face_bbox_j, vert_geom_j, edge_geom_j, edgeFace_adj_j, edgeVert_adj_j, faceEdge_adj_j, class_label_j = data_tuple
 
     try:
         if class_label_j is not None:
@@ -404,7 +399,6 @@ def process_single_item(data_tuple, save_folder, bbox_scaled):
         solid = get_brep((face_bbox_j / bbox_scaled,
                           vert_geom_j / bbox_scaled,
                           edge_geom_j / bbox_scaled,
-                          face_geom_j / bbox_scaled,
                           edgeFace_adj_j,
                           edgeVert_adj_j,
                           faceEdge_adj_j), save_name=save_name)
@@ -422,7 +416,7 @@ def process_single_item(data_tuple, save_folder, bbox_scaled):
         return False
 
 
-def process_batch(face_bbox, vert_geom, edge_geom, face_geom, edgeFace_adj, edgeVert_adj,
+def process_batch(face_bbox, vert_geom, edge_geom, edgeFace_adj, edgeVert_adj,
                   faceEdge_adj, args, class_label=None):
     b = len(face_bbox)
 
@@ -433,7 +427,6 @@ def process_batch(face_bbox, vert_geom, edge_geom, face_geom, edgeFace_adj, edge
             face_bbox[j].cpu().numpy(),
             vert_geom[j].cpu().numpy(),
             edge_geom[j].cpu().numpy(),
-            face_geom[j].cpu().numpy(),
             edgeFace_adj[j].cpu().numpy(),
             edgeVert_adj[j].cpu().numpy(),
             faceEdge_adj[j],
@@ -471,14 +464,6 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initial Topology Model
-    faceEdge_model = FaceEdgeModel(nf=args.max_face,
-                                   d_model=args.FaceEdgeModel['d_model'],
-                                   nhead=args.FaceEdgeModel['nhead'],
-                                   n_layers=args.FaceEdgeModel['n_layers'],
-                                   num_categories=args.edge_classes,
-                                   use_cf=args.use_cf)
-    faceEdge_model.load_state_dict(torch.load(args.faceEdge_path), strict=False)
-    faceEdge_model = faceEdge_model.to(device).eval()
     edgeVert_model = EdgeVertModel(max_num_edge=args.max_num_edge_topo,
                                    max_seq_length=args.max_seq_length,
                                    edge_classes=args.edge_classes,
@@ -520,15 +505,6 @@ def main(args):
     edgeGeom_model.load_state_dict(torch.load(args.edgeGeom_path))
     edgeGeom_model = edgeGeom_model.to(device).eval()
 
-    # Initial FaceGeomTransformer
-    faceGeom_model = FaceGeomTransformer(n_layers=args.FaceGeomModel['n_layers'],
-                                         face_geom_dim=args.FaceGeomModel['face_geom_dim'],
-                                         d_model=args.FaceGeomModel['d_model'],
-                                         nhead=args.FaceGeomModel['nhead'],
-                                         use_cf=args.use_cf)
-    faceGeom_model.load_state_dict(torch.load(args.faceGeom_path))
-    faceGeom_model = faceGeom_model.to(device).eval()
-
     pndm_scheduler = PNDMScheduler(
         num_train_timesteps=1000,
         beta_schedule='linear',
@@ -547,18 +523,14 @@ def main(args):
         clip_sample_range=3
     )
 
-    total_sample = 500
-    b_each = 16 if args.name == 'furniture' else 32
-    for i in tqdm(range(0, total_sample, b_each)):
+    with open(os.path.join('inference', args.name + '_test.pkl'), 'rb') as f:
+        batch_file = pickle.load(f)
 
-        b = min(total_sample, i+b_each)-i
-        if args.use_cf:
-            class_label = torch.randint(6, 7, (b,)).tolist()
-        else:
-            class_label = None
+    b_each = 16 if args.name == 'furniture' else 32
+    for i in tqdm(range(0, len(batch_file), b_each)):
 
         # =======================================Brep Topology=================================================== #
-        datas = get_topology(b, faceEdge_model, edgeVert_model, device, class_label)
+        datas = get_topology(batch_file[i:i + b_each], edgeVert_model, device, args.name)
         fef_adj, edgeVert_adj, faceEdge_adj, edgeFace_adj, vertFace_adj = (datas["fef_adj"],
                                                                            datas["edgeVert_adj"],
                                                                            datas['faceEdge_adj'],
@@ -586,10 +558,8 @@ def main(args):
                                             pndm_scheduler, ddpm_scheduler, class_label)
         edge_geom = [k[l] for k, l in zip(edge_geom, edge_mask)]                 # [ne*12, ...]
 
-        # =======================================Face Geometry=================================================== #
-
         # =======================================Construct Brep================================================== #
-        success_count = process_batch(face_bbox, vert_geom, edge_geom, face_geom,
+        success_count = process_batch(face_bbox, vert_geom, edge_geom,
                                       edgeFace_adj, edgeVert_adj, faceEdge_adj,
                                       args, class_label)
         print(f"Successfully processed {success_count} items out of {b}")
@@ -605,7 +575,6 @@ if __name__ == '__main__':
     name = 'deepcad'
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
-    config['faceGeom_path'] = os.path.join('checkpoints', name, 'geom_faceGeom/epoch_3000.pt')
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
     config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
     config['faceBbox_path'] = os.path.join('checkpoints', name, 'geom_faceBbox/epoch_3000.pt')
@@ -616,4 +585,3 @@ if __name__ == '__main__':
     config['parallel'] = True
 
     main(args=Namespace(**config))
-

@@ -11,7 +11,7 @@ from utils import sort_bbox_multi
 from OCC.Extend.DataExchange import write_step_file
 from brepBuild import Brep2Mesh
 from inference.test_geom import get_topology
-from inference.generate import get_edgeGeom, get_vertGeom, get_brep, text2int
+from inference.generate_noface import get_edgeGeom, get_vertGeom, get_brep, text2int
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -101,17 +101,17 @@ def main(args):
 
         # =======================================Construct Brep================================================== #
         for j in range(b):
+            save_name = os.path.join(args.save_folder, datas['name'][j])
             solid = get_brep((face_bbox[j].cpu().numpy() / args.bbox_scaled,
                               vert_geom[j].cpu().numpy() / args.bbox_scaled,
                               edge_geom[j].cpu().numpy() / args.bbox_scaled,
                               edgeFace_adj[j].cpu().numpy(),
                               edgeVert_adj[j].cpu().numpy(),
-                              faceEdge_adj[j]))
+                              faceEdge_adj[j]), save_name=save_name)
 
             if solid is False:
                 continue
-            save_name = datas['name'][j]
-            write_step_file(solid, f'{args.save_folder}/{save_name}.step')
+            write_step_file(solid, save_name+'.step')
 
     print('write stl...')
     mesh_tool = Brep2Mesh(input_path=args.save_folder)
@@ -125,7 +125,7 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file).get(name, {})
     config['edgeGeom_path'] = os.path.join('checkpoints', name, 'geom_edgeGeom/epoch_3000.pt')
-    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom_1/epoch_1500.pt')
+    config['vertGeom_path'] = os.path.join('checkpoints', name, 'geom_vertGeom/epoch_3000.pt')
     config['save_folder'] = os.path.join('samples', name)
     config['name'] = name
 

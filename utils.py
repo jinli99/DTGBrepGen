@@ -7,17 +7,23 @@ from collections import defaultdict
 
 
 def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
-
-    faceEdge_adj, face_bbox, edge_bbox, fef_adj = (data['faceEdge_adj'], data['face_bbox_wcs'],
-                                                   data['edge_bbox_wcs'], data['fef_adj'])
+    faceEdge_adj, face_bbox, edge_bbox, fef_adj, vertFace_adj = (data['faceEdge_adj'], data['face_bbox_wcs'],
+                                                                 data['edge_bbox_wcs'], data['fef_adj'],
+                                                                 data['vertFace_adj'])
 
     # Skip complex faces and complex edges
-    if data['edge_ctrs'] is None:
+    if 'edge_ctrs' not in data.keys() or 'face_ctrs' not in data.keys():
+        return False
+
+    if data['edge_ctrs'] is None or data['face_ctrs'] is None:
         return False
 
     if 'pc' in data:
         if data['pc'] is None:
             return False
+
+    if max([len(i) for i in vertFace_adj]) > 15:
+        return False
 
     # Check Topology
     edgeVert_adj = data['edgeVert_adj']
