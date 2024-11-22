@@ -33,7 +33,7 @@ pip install chamferdist
 For OCCWL installation, follow the instructions [here](https://github.com/AutodeskAILab/occwl).
 
 ### Pre-trained Models
-Download our pre-trained models from this [link](https://).
+Download our pre-trained models from this [link](https://drive.google.com/file/d/16326mr27gx16j9ewZirT6g5SCsFaeBG4/view?usp=sharing).
 
 ### Dataset
 You can download the datasets from the following sources:

@@ -470,16 +470,6 @@ def process(step_folder, print_error=False, option='deepcad'):
         return 0
 
 
-def mini_process():
-    steps = load_data_with_prefix('/home/jing/PythonProjects/BrepGDM/Supp/ctrs/', 'step')
-    for i in steps:
-        cad_solid = load_step(i)
-        data = parse_solid(cad_solid[0])
-        data = bspline_fitting_local(data)
-        with open(i.replace('step', 'pkl'), "wb") as tf:
-            pickle.dump(data, tf)
-
-
 def bspline_fitting_local(data):
 
     # Fitting surface
@@ -563,29 +553,28 @@ def main():
 
 
 if __name__ == '__main__':
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--input", type=str, help="Data folder path",
-    #                     default='/home/jing/Datasets/DeepCAD')
-    # parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
-    #                     help="Choose between dataset option [abc/deepcad/furniture]")
-    # parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
-    # args = parser.parse_args()
-    #
-    # if args.option == 'deepcad':
-    #     OUTPUT = 'GeomDatasets/deepcad_parsed'
-    # elif args.option == 'abc':
-    #     OUTPUT = 'GeomDatasets/abc_parsed'
-    # else:
-    #     OUTPUT = 'GeomDatasets/furniture_parsed'
-    #
-    # step_dirs = load_steps(args.input)
-    #
-    # process_with_option = partial(process, option=args.option)
-    # process_with_timeout_option = partial(process_with_timeout, process_with_option)
-    #
-    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-    #     results = list(executor.map(process_with_timeout_option, step_dirs))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=str, help="Data folder path")
+    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
+                        help="Choose between dataset option [abc/deepcad/furniture]")
+    parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
+    args = parser.parse_args()
+
+    if args.option == 'deepcad':
+        OUTPUT = 'GeomDatasets/deepcad_parsed'
+    elif args.option == 'abc':
+        OUTPUT = 'GeomDatasets/abc_parsed'
+    else:
+        OUTPUT = 'GeomDatasets/furniture_parsed'
+
+    step_dirs = load_steps(args.input)
+
+    process_with_option = partial(process, option=args.option)
+    process_with_timeout_option = partial(process_with_timeout, process_with_option)
+
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        results = list(executor.map(process_with_timeout_option, step_dirs))
 
     # main()
 
-    mini_process()
+    # mini_process()

@@ -154,7 +154,6 @@ class KNodeCycles:
         c6_t = (term_1_t - 3 * term_2_t + 9 * term_3_t - 6 * term_4_t + 6 * term_5_t - 4 * term_6_t + 4 * term_7_t +
                 3 * term_8_t - 12 * term_9_t + 4 * term_10_t)
 
-        """Jing test!"""
         # c6_t[torch.isinf(c6_t)] = 1000.
 
         return None, (c6_t / 12).unsqueeze(-1).float()

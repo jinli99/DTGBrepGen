@@ -583,7 +583,7 @@ def construct_brep(face_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     post_edges = []
     for idx, (surface, edge_incides) in enumerate(zip(recon_faces, FaceEdgeAdj)):
 
-        """Jing Test 2024/06/16"""
+        """Test 2024/06/16"""
         # print("number of edges:", len(edge_incides))
         # from OCC.Display.SimpleGui import init_display
         # display, start_display, add_menu, add_function_to_menu = init_display()
@@ -664,7 +664,7 @@ def construct_brep(face_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
         fix_wires(face_occ)
         face_occ = fix_face(face_occ)
 
-        # """Jing Test 2024/09/21"""
+        # """Test 2024/09/21"""
         # analyzer = BRepCheck_Analyzer(face_occ)
         # if not analyzer.IsValid():
         #     fixer = ShapeFix_Shape(face_occ)
@@ -680,22 +680,19 @@ def construct_brep(face_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
 
         post_faces.append(face_occ)
 
-        # """Jing Test 2024/06/16"""
+        # """Test 2024/06/16"""
         # from OCC.Core.TopExp import TopExp_Explorer
         # from OCC.Core.TopAbs import TopAbs_EDGE
         # from OCC.Display.SimpleGui import init_display
         # display, start_display, add_menu, add_function_to_menu = init_display()
         # display.DisplayShape(face_occ, color='BLUE', update=True)
-        # # 创建一个explorer来遍历面上的边缘(edges)
         # edge_explorer = TopExp_Explorer(face_occ, TopAbs_EDGE)
-        # # 遍历并显示每一边
         # ii = 0
         # while edge_explorer.More():
         #     edge = edge_explorer.Current()
         #     display.DisplayShape(edge, color='RED', update=True)
         #     edge_explorer.Next()
         #     ii += 1
-        # # 开始交互式事件循环
         # print("number of edges:", ii)
         # start_display()
         # print(111)

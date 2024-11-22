@@ -520,5 +520,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # visualize_step('/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/Ours/')
-    visualize_stl('/home/jing/PythonProjects/BrepGDM/comparison/datas/deepcad/reference_train/0092')
+   pass
