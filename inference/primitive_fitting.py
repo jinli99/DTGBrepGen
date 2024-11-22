@@ -957,7 +957,7 @@ def process_one_surface(points, device, weights=None, face_id=0):
     plane_err = recon_basic_shapes["plane_err"]
     sphere_err = recon_basic_shapes["sphere_err"]
     cylinder_err = recon_basic_shapes["cylinder_err"]
-    cone_err = 100
+    cone_err = 100     # we do not use cone fitting in this project
 
     if recon_basic_shapes['sphere_params'][1] > 1.7 or plane_err < 1e-3:
         sphere_err = np.inf

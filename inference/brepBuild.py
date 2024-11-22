@@ -301,10 +301,21 @@ class STModel(torch.nn.Module):
         self.surf_st = torch.nn.Parameter(torch.FloatTensor([1,0,0,0]).unsqueeze(0).repeat(num_surf,1))
 
 
-def joint_optimize(edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, FaceEdgeAdj, num_edge, num_surf):
+def joint_optimize(edge_ncs, face_ncs, surfPos, unique_vertices, EdgeVertexAdj, FaceEdgeAdj, num_edge, num_surf):
     """
     Jointly optimize the face/edge/vertex based on topology
     """
+    loss_func = ChamferDistance()
+
+    model = STModel(num_edge, num_surf)
+    model = model.cuda().train()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-3,
+        betas=(0.95, 0.999),
+        weight_decay=1e-6,
+        eps=1e-08,
+    )
 
     # Optimize edges (directly compute)
     edge_ncs_se = edge_ncs[:, [0, -1]]
@@ -345,7 +356,55 @@ def joint_optimize(edge_ncs, surfPos, unique_vertices, EdgeVertexAdj, FaceEdgeAd
         weighted_vec = np.tile(start_vec[np.newaxis, :], (32, 1)) * (1 - weight) + np.tile(end_vec, (32, 1)) * weight
         edge_wcs[index] += weighted_vec
 
-    return edge_wcs
+    # Optimize surfaces
+    face_edges = []
+    for adj in FaceEdgeAdj:
+        all_pnts = edge_wcs[adj]
+        face_edges.append(torch.FloatTensor(all_pnts).cuda())
+
+    surf_wcs_init = []
+    for edges_perface, ncs, bbox in zip(face_edges, face_ncs, surfPos):
+
+        edge_wcs_min, edge_wcs_max = get_bbox_minmax(edges_perface.reshape(-1, 3).detach().cpu().numpy())
+        edge_wcs_center = (edge_wcs_min + edge_wcs_max) * 0.5
+        edge_wcs_size = edge_wcs_max - edge_wcs_min
+
+        surf_ncs_min, surf_ncs_max = get_bbox_minmax(ncs.reshape(-1, 3))
+        surf_ncs_center = (surf_ncs_min + surf_ncs_max) * 0.5
+        surf_ncs_size = surf_ncs_max - surf_ncs_min
+        ncs -= surf_ncs_center
+
+        bbox_size = bbox[3:] - bbox[0:3]
+        scale_size = (np.maximum(bbox_size, edge_wcs_size) / surf_ncs_size).max()
+
+        wcs = ncs * scale_size * 1.05 + edge_wcs_center
+        surf_wcs_init.append(wcs)
+
+    surf_wcs_init = np.stack(surf_wcs_init)
+
+    # optimize the surface offset
+    surf = torch.FloatTensor(surf_wcs_init).cuda()
+    for iters in range(200):
+        surf_scale = model.surf_st[:, 0].reshape(-1, 1, 1, 1)
+        surf_offset = model.surf_st[:, 1:].reshape(-1, 1, 1, 3)
+        surf_updated = surf + surf_offset
+
+        surf_loss = 0
+        for surf_pnt, edge_pnts in zip(surf_updated, face_edges):
+            surf_pnt = surf_pnt.reshape(-1, 3)
+            edge_pnts = edge_pnts.reshape(-1, 3).detach()
+            surf_loss += loss_func(surf_pnt.unsqueeze(0), edge_pnts.unsqueeze(0), bidirectional=False, reverse=True)
+        surf_loss /= len(surf_updated)
+
+        optimizer.zero_grad()
+        (surf_loss).backward()
+        optimizer.step()
+
+        # print(f'Iter {iters} surf:{surf_loss:.5f}')
+
+    surf_wcs = surf_updated.detach().cpu().numpy()
+
+    return edge_wcs, surf_wcs
 
 
 def fix_wires(face, debug=False):
@@ -414,32 +473,33 @@ def project_point_on_surface(point, surface):
         return point
 
 
-def fit_basic_surface(outer_points):
+def fit_basic_surface(outer_points, inner_points):
     """
     Args:
         outer_points: ne*32*3
+        inner_points: 32*32*3
     """
     # outer_points, inner_points = args
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     indices = np.linspace(0, outer_points.shape[1] - 1, 16, dtype=int)
     outer_points = np.array([outer_points[i][indices] for i in range(outer_points.shape[0])])
     outer_points = outer_points.reshape(-1, 3)
+    inner_points = inner_points[::8, ::8, :].reshape(-1, 3)
 
-    out = process_one_surface(outer_points, device, None)
+    out = process_one_surface(np.concatenate([inner_points, outer_points]),
+                              device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                              weights=np.array([0.5] * inner_points.shape[0] + [1.0] * outer_points.shape[0]).reshape(
+                                  -1, 1))
 
-    if out['err'] < 1:
-        return out
-    else:
-        assert False
-
-
-def fit_surface(face_id, edge_wcs, FaceEdgeAdj):
-    out = fit_basic_surface(outer_points=edge_wcs[FaceEdgeAdj[face_id]])
     return out
 
 
-def construct_brep(edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
+def fit_surface(face_id, edge_wcs, face_wcs, FaceEdgeAdj):
+    out = fit_basic_surface(outer_points=edge_wcs[FaceEdgeAdj[face_id]], inner_points=face_wcs[face_id])
+    return out
+
+
+def construct_brep(face_wcs, edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     """
     Fit parametric surfaces / curves and trim into B-rep
     """
@@ -449,33 +509,47 @@ def construct_brep(edge_wcs, FaceEdgeAdj, EdgeVertexAdj):
     recon_faces = []
 
     with ProcessPoolExecutor(max_workers=6) as executor:
-        results = list(executor.map(fit_surface, range(len(FaceEdgeAdj)), [edge_wcs]*len(FaceEdgeAdj), [FaceEdgeAdj]*len(FaceEdgeAdj)))
+        results = list(executor.map(fit_surface, range(len(FaceEdgeAdj)), [edge_wcs]*len(FaceEdgeAdj), [face_wcs]*len(FaceEdgeAdj), [FaceEdgeAdj]*len(FaceEdgeAdj)))
 
-    for out in results:
-        if out['type'] == 'plane':
-            direction, distance = out['params']
-            dire = gp_Dir(direction[0], direction[1], direction[2])
-            point = gp_Pnt(direction[0] * distance, direction[1] * distance, direction[2] * distance)
-            plane = gp_Pln(point, dire)
-            approx_face = Geom_Plane(plane)
-        elif out['type'] == 'sphere':
-            center, radius = out['params']
-            center_point = gp_Pnt(center[0], center[1], center[2])
-            axis = gp_Ax3(center_point, gp_Dir(0, 0, 1))
-            approx_face = Geom_SphericalSurface(axis, radius)
-        elif out['type'] == 'cylinder':
-            direction, pnt, radius = out['params']
-            dire = gp_Dir(direction[0], direction[1], direction[2])
-            origin = gp_Pnt(pnt[0], pnt[1], pnt[2])
-            axis = gp_Ax3(origin, dire)
-            approx_face = Geom_CylindricalSurface(axis, radius)
+    for idx, out in enumerate(results):
+
+        if out['err'] < 0.01:
+
+            if out['type'] == 'plane':
+                direction, distance = out['params']
+                dire = gp_Dir(direction[0], direction[1], direction[2])
+                point = gp_Pnt(direction[0] * distance, direction[1] * distance, direction[2] * distance)
+                plane = gp_Pln(point, dire)
+                approx_face = Geom_Plane(plane)
+            elif out['type'] == 'sphere':
+                center, radius = out['params']
+                center_point = gp_Pnt(center[0], center[1], center[2])
+                axis = gp_Ax3(center_point, gp_Dir(0, 0, 1))
+                approx_face = Geom_SphericalSurface(axis, radius)
+            elif out['type'] == 'cylinder':
+                direction, pnt, radius = out['params']
+                dire = gp_Dir(direction[0], direction[1], direction[2])
+                origin = gp_Pnt(pnt[0], pnt[1], pnt[2])
+                axis = gp_Ax3(origin, dire)
+                approx_face = Geom_CylindricalSurface(axis, radius)
+            else:
+                assert out['type'] == 'cone'
+                apex, axis, theta = out['params']
+                apex_point = gp_Pnt(apex[0], apex[1], apex[2])
+                axis_dir = gp_Dir(axis[0], axis[1], axis[2])
+                ax3 = gp_Ax3(apex_point, axis_dir)
+                approx_face = Geom_ConicalSurface(ax3, theta, 1)
+
         else:
-            assert out['type'] == 'cone'
-            apex, axis, theta = out['params']
-            apex_point = gp_Pnt(apex[0], apex[1], apex[2])
-            axis_dir = gp_Dir(axis[0], axis[1], axis[2])
-            ax3 = gp_Ax3(apex_point, axis_dir)
-            approx_face = Geom_ConicalSurface(ax3, theta, 1)
+            points = face_wcs[idx]
+            num_u_points, num_v_points = points.shape[0], points.shape[1]
+            uv_points_array = TColgp_Array2OfPnt(1, num_u_points, 1, num_v_points)
+            for u_index in range(1, num_u_points + 1):
+                for v_index in range(1, num_v_points + 1):
+                    pt = points[u_index - 1, v_index - 1]
+                    point_3d = gp_Pnt(float(pt[0]), float(pt[1]), float(pt[2]))
+                    uv_points_array.SetValue(u_index, v_index, point_3d)
+            approx_face = GeomAPI_PointsToBSplineSurface(uv_points_array, 3, 8, GeomAbs_C2, 5e-2).Surface()
 
         recon_faces.append(approx_face)
 
