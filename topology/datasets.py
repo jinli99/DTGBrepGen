@@ -315,21 +315,42 @@ class EdgeVertDataset(torch.utils.data.Dataset):
         edge_mask = edge_mask.sum(keepdims=True)               # 1
         seq_mask = seq_mask.sum(keepdims=True)                 # 1
 
-        if self.use_cf:
+        if self.use_cf and self.use_pc:
             data_class = text2int[data['name'].split('_')[0]] + 1
-            return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
-                    torch.from_numpy(edge_mask),               # 1
-                    torch.from_numpy(share_id),                # max_num_edge
-                    torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
-                    torch.from_numpy(seq_mask),                # 1
-                    torch.LongTensor([data_class])             # 1
+            return (torch.from_numpy(edgeFace_adj),           # max_num_edge*2
+                    torch.from_numpy(edge_mask),              # max_num_edge
+                    torch.from_numpy(share_id),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),   # max_seq_length
+                    torch.from_numpy(seq_mask),               # max_seq_length
+                    torch.LongTensor([data_class]),           # 1
+                    torch.from_numpy(data['pc'])              # 2000*3
                     )
+
+        elif self.use_cf:
+            data_class = text2int[data['name'].split('_')[0]] + 1
+            return (torch.from_numpy(edgeFace_adj),           # max_num_edge*2
+                    torch.from_numpy(edge_mask),              # max_num_edge
+                    torch.from_numpy(share_id),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),   # max_seq_length
+                    torch.from_numpy(seq_mask),               # max_seq_length
+                    torch.LongTensor([data_class])            # 1
+                    )
+
+        elif self.use_pc:
+            return (torch.from_numpy(edgeFace_adj),           # max_num_edge*2
+                    torch.from_numpy(edge_mask),              # max_num_edge
+                    torch.from_numpy(share_id),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),   # max_seq_length
+                    torch.from_numpy(seq_mask),               # max_seq_length
+                    torch.from_numpy(data['pc'])              # 2000*3
+                    )
+
         else:
-            return (torch.from_numpy(edgeFace_adj),            # max_num_edge*2
-                    torch.from_numpy(edge_mask),               # 1
-                    torch.from_numpy(share_id),                # max_num_edge
-                    torch.from_numpy(topo_seq).squeeze(-1),    # max_seq_length
-                    torch.from_numpy(seq_mask),                # 1
+            return (torch.from_numpy(edgeFace_adj),           # max_num_edge*2
+                    torch.from_numpy(edge_mask),              # max_num_edge
+                    torch.from_numpy(share_id),               # max_num_edge
+                    torch.from_numpy(topo_seq).squeeze(-1),   # max_seq_length
+                    torch.from_numpy(seq_mask)                # max_seq_length
                     )
 
 
@@ -363,5 +384,5 @@ class FaceEdgeDataset(torch.utils.data.Dataset):
 
 
 if __name__ == '__main__':
-    # create_topo_datasets(data_type='train', option='abc')
-    create_topo_datasets(data_type='test', option='abc')
+    # create_topo_datasets(data_type='train', option='deepcad')
+    create_topo_datasets(data_type='test', option='deepcad')

@@ -542,6 +542,94 @@ def bspline_fitting_local(data):
     return data
 
 
+def count_bspline_degree():
+    from OCC.Core.STEPControl import STEPControl_Reader
+    from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE
+    from OCC.Core.BRep import BRep_Tool
+    from OCC.Core.Geom import Geom_BSplineCurve, Geom_BSplineSurface
+    from OCC.Core.TopoDS import topods
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCC.Core.GeomAbs import (
+        GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
+        GeomAbs_Sphere, GeomAbs_Torus, GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface, GeomAbs_SurfaceOfRevolution,
+        GeomAbs_SurfaceOfExtrusion, GeomAbs_OffsetSurface,
+        GeomAbs_OtherSurface, GeomAbs_BSplineCurve
+    )
+
+    files = load_data_with_prefix('/home/jing/Datasets/DeepCAD', 'step')[:10000]
+    total_curve = 0
+    total_surf = 0
+    high_curve = 0
+    high_surf = 0
+
+    for file in tqdm(files):
+        try:
+            cad_solid = load_step(file)
+            solid = cad_solid[0]
+            solid = solid.split_all_closed_faces(num_splits=2)
+            solid = solid.split_all_closed_edges(num_splits=2)
+            if len(list(solid.faces())) > MAX_FACE:
+                continue
+        except Exception as e:
+            continue
+        if len(cad_solid) != 1:
+            continue
+
+        reader = STEPControl_Reader()
+        status = reader.ReadFile(file)
+        if status == 1:
+            reader.TransferRoots()
+            shape = reader.OneShape()
+        else:
+            continue
+
+        # 遍历所有边
+        edge_explorer = TopExp_Explorer(shape, TopAbs_EDGE)
+        while edge_explorer.More():
+            edge = topods.Edge(edge_explorer.Current())
+            curve_handle, _, _ = BRep_Tool.Curve(edge)
+            if curve_handle is not None:
+                curve = Geom_BSplineCurve.DownCast(curve_handle)
+                if curve is not None:
+                    total_curve += 1
+                    if curve.Degree() > 3:
+                        high_curve += 1
+            edge_explorer.Next()
+
+        # 遍历所有面
+        # face_explorer = TopExp_Explorer(shape, TopAbs_FACE)
+        # while face_explorer.More():
+        #     face = topods.Face(face_explorer.Current())
+        #     surf_handle = BRep_Tool.Surface(face)
+        #     if surf_handle is not None:
+        #         surf = Geom_BSplineSurface.DownCast(surf_handle)
+        #         if surf is not None:
+        #             total_surf += 1
+        #             if surf.UDegree() > 3 or surf.VDegree() > 3:
+        #                 high_surf += 1
+        #     face_explorer.Next()
+
+    print("curve:", total_curve, high_curve, "surf:", total_surf, high_surf, )
+
+
+def sample_pc():
+    import trimesh
+
+    pkl_files = load_data_with_prefix('/home/jing/PythonProjects/BrepGDM/data_process/GeomDatasets/deepcad_parsed/', 'pkl')
+    for pkl in tqdm(pkl_files):
+        with open(pkl, 'rb') as f:
+            data = pickle.load(f)
+        names = pkl.split('/')
+        stl_path = os.path.join('/home/jing/Datasets/DeepCAD_Stl/', names[-2], names[-1][:-4]+'.stl')
+        mesh = trimesh.load(stl_path)
+        points, _ = trimesh.sample.sample_surface(mesh, 2000)
+        data['pc'] = np.array(points)
+        with open(pkl, 'wb') as f:
+            pickle.dump(data, f)
+
+
 def main():
     files = load_data_with_prefix('data_process/GeomDatasets/furniture_parsed', 'pkl')
     for file in tqdm(files):
@@ -553,28 +641,32 @@ def main():
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, help="Data folder path")
-    parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
-                        help="Choose between dataset option [abc/deepcad/furniture]")
-    parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
-    args = parser.parse_args()
-
-    if args.option == 'deepcad':
-        OUTPUT = 'GeomDatasets/deepcad_parsed'
-    elif args.option == 'abc':
-        OUTPUT = 'GeomDatasets/abc_parsed'
-    else:
-        OUTPUT = 'GeomDatasets/furniture_parsed'
-
-    step_dirs = load_steps(args.input)
-
-    process_with_option = partial(process, option=args.option)
-    process_with_timeout_option = partial(process_with_timeout, process_with_option)
-
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        results = list(executor.map(process_with_timeout_option, step_dirs))
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--input", type=str, default='/home/jing/Datasets/DeepCAD', help="Data folder path")
+    # parser.add_argument("--option", type=str, choices=['abc', 'deepcad', 'furniture'], default='deepcad',
+    #                     help="Choose between dataset option [abc/deepcad/furniture]")
+    # parser.add_argument("--interval", type=int, help="Data range index, only required for abc/deepcad")
+    # args = parser.parse_args()
+    #
+    # if args.option == 'deepcad':
+    #     OUTPUT = 'GeomDatasets/deepcad_parsed'
+    # elif args.option == 'abc':
+    #     OUTPUT = 'GeomDatasets/abc_parsed'
+    # else:
+    #     OUTPUT = 'GeomDatasets/furniture_parsed'
+    #
+    # step_dirs = load_steps(args.input)
+    # # for i in range(1, 10):
+    # #     process(step_dirs[i])
+    #
+    # process_with_option = partial(process, option=args.option)
+    # process_with_timeout_option = partial(process_with_timeout, process_with_option)
+    #
+    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    #     results = list(executor.map(process_with_timeout_option, step_dirs))
 
     # main()
 
-    # mini_process()
+    sample_pc()
+
+    # count_bspline_degree()

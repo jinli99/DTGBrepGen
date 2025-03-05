@@ -22,6 +22,7 @@ furniture:
     d_model: 128
     nhead: 4
     n_layers: 4
+    use_gat: Ture
   EdgeVertModel:
     d_model: 256
     n_layers: 4

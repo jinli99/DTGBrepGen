@@ -285,20 +285,36 @@ class FaceBboxData(torch.utils.data.Dataset):
         fef_adj, _ = pad_zero(fef_adj, max_len=self.max_face, dim=1)         # max_faces*max_faces
         mask = mask.sum(keepdims=True)                                       # 1
 
+        if self.use_pc and data_class is not None:
+            point_data = data['pc']
+            return (
+                torch.FloatTensor(face_bbox),                                # max_faces*6
+                torch.from_numpy(fef_adj),                                   # max_faces*max_faces
+                torch.from_numpy(mask),                                      # 1
+                torch.LongTensor([data_class + 1]),                          # add 1, class 0 = uncond (furniture)
+                torch.from_numpy(point_data)                                 # 2000*3
+            )
         if data_class is not None:
             return (
-                torch.FloatTensor(face_bbox),       # max_faces*6
-                torch.from_numpy(fef_adj),          # max_faces*max_faces
-                torch.from_numpy(mask),             # 1
-                torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
-                # 2000*3 tensor
+                torch.FloatTensor(face_bbox),                                # max_faces*6
+                torch.from_numpy(fef_adj),                                   # max_faces*max_faces
+                torch.from_numpy(mask),                                      # 1
+                torch.LongTensor([data_class + 1])                           # add 1, class 0 = uncond (furniture)
             )
-        else:
+        if self.use_pc:
+            point_data = data['pc']
             return (
-                torch.FloatTensor(face_bbox),       # max_faces*6
-                torch.from_numpy(fef_adj),          # max_faces*max_faces
-                torch.from_numpy(mask),             # 1
+                torch.FloatTensor(face_bbox),                                # max_faces*6
+                torch.from_numpy(fef_adj),                                   # max_faces*max_faces
+                torch.from_numpy(mask),                                      # 1
+                torch.from_numpy(point_data)                                 # 2000*3
             )
+
+        return (
+            torch.FloatTensor(face_bbox),                                    # max_faces*6
+            torch.from_numpy(fef_adj),                                       # max_faces*max_faces
+            torch.from_numpy(mask)                                           # 1
+        )
 
 
 class VertGeomData(torch.utils.data.Dataset):
@@ -356,6 +372,18 @@ class VertGeomData(torch.utils.data.Dataset):
         vertFace_mask = vertFace_mask.sum(-1, keepdims=True)                      # nv*1
         vertFace_mask, _ = pad_zero(vertFace_mask, max_len=self.max_vert)         # nv*1
 
+        if self.use_pc and data_class is not None:
+            point_data = data['pc']
+            return (
+                torch.FloatTensor(vert_geom),       # max_vertices*3
+                torch.from_numpy(mask),             # 1
+                torch.FloatTensor(vertFace_bbox),   # nv*vf*6
+                torch.from_numpy(vertFace_mask),    # nv*1
+                torch.from_numpy(edgeVert_adj),     # ne*2
+                torch.from_numpy(edge_mask),        # 1
+                torch.LongTensor([data_class + 1]), # add 1, class 0 = uncond (furniture)
+                torch.from_numpy(point_data)        # 2000*3
+            )
         if data_class is not None:
             return (
                 torch.FloatTensor(vert_geom),       # max_vertices*3
@@ -366,7 +394,8 @@ class VertGeomData(torch.utils.data.Dataset):
                 torch.from_numpy(edge_mask),        # 1
                 torch.LongTensor([data_class + 1])  # add 1, class 0 = uncond (furniture)
             )
-        else:
+        if self.use_pc:
+            point_data = data['pc']
             return (
                 torch.FloatTensor(vert_geom),       # max_vertices*3
                 torch.from_numpy(mask),             # 1
@@ -374,7 +403,16 @@ class VertGeomData(torch.utils.data.Dataset):
                 torch.from_numpy(vertFace_mask),    # nv*1
                 torch.from_numpy(edgeVert_adj),     # ne*2
                 torch.from_numpy(edge_mask),        # 1
+                torch.from_numpy(point_data)        # 2000*3
             )
+        return (
+            torch.FloatTensor(vert_geom),           # max_vertices*3
+            torch.from_numpy(mask),                 # 1
+            torch.FloatTensor(vertFace_bbox),       # nv*vf*6
+            torch.from_numpy(vertFace_mask),        # nv*1
+            torch.from_numpy(edgeVert_adj),         # ne*2
+            torch.from_numpy(edge_mask),            # 1
+        )
 
 
 class EdgeGeomData(torch.utils.data.Dataset):
@@ -427,29 +465,48 @@ class EdgeGeomData(torch.utils.data.Dataset):
 
         random_indices = np.random.permutation(edge_ctrs.shape[0])
         edgeFace_bbox = edgeFace_bbox[random_indices]
-        edge_geom = edge_ctrs[random_indices]              # ne*12
-        edgeVert_geom = edgeVert_geom[random_indices]      # ne*2*3
+        edge_geom = edge_ctrs[random_indices]          # ne*12
+        edgeVert_geom = edgeVert_geom[random_indices]  # ne*2*3
 
         edgeFace_bbox, mask = pad_zero(edgeFace_bbox, max_len=self.max_num_edge, dim=0)
         edge_geom, _ = pad_zero(edge_geom, max_len=self.max_num_edge, dim=0)
         edgeVert_geom, _ = pad_zero(edgeVert_geom, max_len=self.max_num_edge, dim=0)
         mask = mask.sum(keepdims=True)
 
+        if self.use_pc and data_class is not None:
+            point_data = data['pc']
+            return (
+                torch.FloatTensor(edge_geom),          # max_num_edge*12
+                torch.FloatTensor(edgeFace_bbox),      # max_num_edge*2*6
+                torch.FloatTensor(edgeVert_geom),      # max_num_edge*2*3
+                torch.from_numpy(mask),                # 1
+                torch.LongTensor([data_class + 1]),    # add 1, class 0 = uncond (furniture)
+                torch.from_numpy(point_data)           # 2000*3
+            )
         if data_class is not None:
             return (
-                torch.FloatTensor(edge_geom),              # max_num_edge*12
-                torch.FloatTensor(edgeFace_bbox),          # max_num_edge*2*6
-                torch.FloatTensor(edgeVert_geom),          # max_num_edge*2*3
-                torch.from_numpy(mask),                    # 1
-                torch.LongTensor([data_class + 1])         # add 1, class 0 = uncond (furniture)
+                torch.FloatTensor(edge_geom),          # max_num_edge*12
+                torch.FloatTensor(edgeFace_bbox),      # max_num_edge*2*6
+                torch.FloatTensor(edgeVert_geom),      # max_num_edge*2*3
+                torch.from_numpy(mask),                # 1
+                torch.LongTensor([data_class + 1])     # add 1, class 0 = uncond (furniture)
             )
-        else:
+        if self.use_pc:
+            point_data = data['pc']
             return (
-                torch.FloatTensor(edge_geom),              # max_num_edge*32*3
-                torch.FloatTensor(edgeFace_bbox),          # max_num_edge*2*6
-                torch.FloatTensor(edgeVert_geom),          # max_num_edge*2*3
-                torch.from_numpy(mask),                    # 1
+                torch.FloatTensor(edge_geom),          # max_num_edge*12
+                torch.FloatTensor(edgeFace_bbox),      # max_num_edge*2*6
+                torch.FloatTensor(edgeVert_geom),      # max_num_edge*2*3
+                torch.from_numpy(mask),                # 1
+                torch.from_numpy(point_data)           # 2000*3
             )
+
+        return (
+            torch.FloatTensor(edge_geom),              # max_num_edge*32*3
+            torch.FloatTensor(edgeFace_bbox),          # max_num_edge*2*6
+            torch.FloatTensor(edgeVert_geom),          # max_num_edge*2*3
+            torch.from_numpy(mask),                    # 1
+        )
 
 
 class FaceGeomData(torch.utils.data.Dataset):
@@ -517,27 +574,53 @@ class FaceGeomData(torch.utils.data.Dataset):
         faceVert_mask, _ = pad_zero(faceVert_mask, max_len=self.max_face, dim=0)                # max_faces*1
         faceEdge_geom, _ = pad_zero(faceEdge_geom, max_len=self.max_face, dim=0)                # max_faces*fe*12
         faceEdge_mask, _ = pad_zero(faceEdge_mask, max_len=self.max_face, dim=0)                # max_faces*1
+
+        if self.use_pc and data_class is not None:
+            point_data = data['pc']
+            return (
+                torch.FloatTensor(face_geom),                                                   # max_faces*48
+                torch.FloatTensor(face_bbox),                                                   # max_faces*6
+                torch.FloatTensor(faceVert_geom),                                               # max_faces*fv*3
+                torch.FloatTensor(faceEdge_geom),                                               # max_faces*fe*12
+                torch.from_numpy(mask),                                                         # 1
+                torch.from_numpy(faceVert_mask),                                                # max_faces*1
+                torch.from_numpy(faceEdge_mask),                                                # max_faces*1
+                torch.LongTensor([data_class + 1]),                                             # add 1, class0=un-cond
+                torch.from_numpy(point_data)                                                    # 2000*3
+            )
         if data_class is not None:
             return (
-                torch.FloatTensor(face_geom),          # max_faces*48
-                torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
-                torch.FloatTensor(faceEdge_geom),      # max_faces*fe*12
-                torch.from_numpy(mask),                # 1
-                torch.from_numpy(faceVert_mask),       # max_faces*1
-                torch.from_numpy(faceEdge_mask),       # max_faces*1
-                torch.LongTensor([data_class + 1])     # add 1, class 0 = un-cond (furniture)
+                torch.FloatTensor(face_geom),                                                   # max_faces*48
+                torch.FloatTensor(face_bbox),                                                   # max_faces*6
+                torch.FloatTensor(faceVert_geom),                                               # max_faces*fv*3
+                torch.FloatTensor(faceEdge_geom),                                               # max_faces*fe*12
+                torch.from_numpy(mask),                                                         # 1
+                torch.from_numpy(faceVert_mask),                                                # max_faces*1
+                torch.from_numpy(faceEdge_mask),                                                # max_faces*1
+                torch.LongTensor([data_class + 1])                                              # add 1, class0=un-cond
             )
-        else:
+        if self.use_pc:
+            point_data = data['pc']
             return (
-                torch.FloatTensor(face_geom),          # max_faces*48
-                torch.FloatTensor(face_bbox),          # max_faces*6
-                torch.FloatTensor(faceVert_geom),      # max_faces*fv*3
-                torch.FloatTensor(faceEdge_geom),      # max_faces*fe*12
-                torch.from_numpy(mask),                # 1
-                torch.from_numpy(faceVert_mask),       # max_faces*1
-                torch.from_numpy(faceEdge_mask),       # max_faces*1 un-cond deepcad/abc
+                torch.FloatTensor(face_geom),                                                   # max_faces*48
+                torch.FloatTensor(face_bbox),                                                   # max_faces*6
+                torch.FloatTensor(faceVert_geom),                                               # max_faces*fv*3
+                torch.FloatTensor(faceEdge_geom),                                               # max_faces*fe*12
+                torch.from_numpy(mask),                                                         # 1
+                torch.from_numpy(faceVert_mask),                                                # max_faces*1
+                torch.from_numpy(faceEdge_mask),                                                # max_faces*1
+                torch.from_numpy(point_data)                                                    # 2000*3
             )
+
+        return (
+            torch.FloatTensor(face_geom),                                                       # max_faces*48
+            torch.FloatTensor(face_bbox),                                                       # max_faces*6
+            torch.FloatTensor(faceVert_geom),                                                   # max_faces*fv*3
+            torch.FloatTensor(faceEdge_geom),                                                   # max_faces*fe*12
+            torch.from_numpy(mask),                                                             # 1
+            torch.from_numpy(faceVert_mask),                                                    # max_faces*1
+            torch.from_numpy(faceEdge_mask),                                                    # max_faces*1
+        )
 
 
 if __name__ == '__main__':

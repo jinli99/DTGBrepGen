@@ -362,22 +362,23 @@ def joint_optimize(edge_ncs, face_ncs, surfPos, unique_vertices, EdgeVertexAdj, 
         all_pnts = edge_wcs[adj]
         face_edges.append(torch.FloatTensor(all_pnts).cuda())
 
+    # Initialize surface in wcs based on surface pos
     surf_wcs_init = []
+    bbox_threshold_min = []
+    bbox_threshold_max = []
     for edges_perface, ncs, bbox in zip(face_edges, face_ncs, surfPos):
+        surf_center, surf_scale = compute_bbox_center_and_size(bbox[0:3], bbox[3:])
+        edges_perface_flat = edges_perface.reshape(-1, 3).detach().cpu().numpy()
+        min_point, max_point = get_bbox_minmax(edges_perface_flat)
+        edge_center, edge_scale = compute_bbox_center_and_size(min_point, max_point)
+        bbox_threshold_min.append(min_point)
+        bbox_threshold_max.append(max_point)
 
-        edge_wcs_min, edge_wcs_max = get_bbox_minmax(edges_perface.reshape(-1, 3).detach().cpu().numpy())
-        edge_wcs_center = (edge_wcs_min + edge_wcs_max) * 0.5
-        edge_wcs_size = edge_wcs_max - edge_wcs_min
+        # increase surface size if does not fully cover the wire bbox
+        if surf_scale < edge_scale:
+            surf_scale = 1.05 * edge_scale
 
-        surf_ncs_min, surf_ncs_max = get_bbox_minmax(ncs.reshape(-1, 3))
-        surf_ncs_center = (surf_ncs_min + surf_ncs_max) * 0.5
-        surf_ncs_size = surf_ncs_max - surf_ncs_min
-        ncs -= surf_ncs_center
-
-        bbox_size = bbox[3:] - bbox[0:3]
-        scale_size = (np.maximum(bbox_size, edge_wcs_size) / surf_ncs_size).max()
-
-        wcs = ncs * scale_size * 1.05 + edge_wcs_center
+        wcs = ncs * (surf_scale / 2) + surf_center
         surf_wcs_init.append(wcs)
 
     surf_wcs_init = np.stack(surf_wcs_init)

@@ -51,6 +51,7 @@ class FaceVaeTrainer:
         # Initializer dataloader
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
                                                             shuffle=True,
+                                                            drop_last=True,
                                                             batch_size=args.batch_size,
                                                             num_workers=8)
         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -172,6 +173,7 @@ class EdgeVaeTrainer:
         # Initializer dataloader
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
                                                             shuffle=True,
+                                                            drop_last=True,
                                                             batch_size=args.batch_size,
                                                             num_workers=8)
         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -275,7 +277,8 @@ class FaceBboxTrainer:
                                     edge_classes=self.edge_classes,
                                     act_fn_in=nn.ReLU(),
                                     act_fn_out=nn.ReLU(),
-                                    use_cf=self.use_cf)
+                                    use_cf=self.use_cf,
+                                    use_pc=self.use_pc)
         model = nn.DataParallel(model)                      # distributed training
         self.model = model.to(self.device).train()
 
@@ -305,6 +308,7 @@ class FaceBboxTrainer:
         # Initializer dataloader
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
                                                             shuffle=True,
+                                                            drop_last=True,
                                                             batch_size=args.batch_size,
                                                             num_workers=16)
         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -323,11 +327,18 @@ class FaceBboxTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
+                if self.use_cf and self.use_pc:
+                    face_bbox, fef_adj, face_mask, class_label, point_data = data   # b*nf*6, b*nf*nf, b*1, b*1, b*2000*3
+                elif self.use_cf:
                     face_bbox, fef_adj, face_mask, class_label = data   # b*nf*6, b*nf*nf, b*1, b*1
-                else:
-                    face_bbox, fef_adj, face_mask = data                # b*nf*6, b*nf*nf, b*1,
+                    point_data = None
+                elif self.use_pc:
+                    face_bbox, fef_adj, face_mask, point_data = data
                     class_label = None
+                else:
+                    face_bbox, fef_adj, face_mask = data
+                    class_label = None
+                    point_data = None
                 nf = face_mask.max()
                 face_bbox = face_bbox[:, :nf, :]        # b*nf*6
                 fef_adj = fef_adj[:, :nf, :nf]          # b*nf*nf
@@ -345,7 +356,7 @@ class FaceBboxTrainer:
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                 # Predict start
-                pred_noise = self.model(x_t, e, face_mask, class_label, t.unsqueeze(-1))                # b*nv*6
+                pred_noise = self.model(x_t, e, face_mask, class_label, point_data, t.unsqueeze(-1))          # b*nv*6
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -387,14 +398,21 @@ class FaceBboxTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
-                    face_bbox, fef_adj, face_mask, class_label = data  # b*nf*6, b*nf*nf, b*1, b*1
-                else:
-                    face_bbox, fef_adj, face_mask = data  # b*nf*6, b*nf*nf, b*1,
+                if self.use_cf and self.use_pc:
+                    face_bbox, fef_adj, face_mask, class_label, point_data = data   # b*nf*6, b*nf*nf, b*1, b*1, b*2000*3
+                elif self.use_cf:
+                    face_bbox, fef_adj, face_mask, class_label = data   # b*nf*6, b*nf*nf, b*1, b*1
+                    point_data = None
+                elif self.use_pc:
+                    face_bbox, fef_adj, face_mask, point_data = data
                     class_label = None
+                else:
+                    face_bbox, fef_adj, face_mask = data
+                    class_label = None
+                    point_data = None
                 nf = face_mask.max()
-                face_bbox = face_bbox[:, :nf, :]      # b*nf*6
-                fef_adj = fef_adj[:, :nf, :nf]        # b*nf*nf
+                face_bbox = face_bbox[:, :nf, :]  # b*nf*6
+                fef_adj = fef_adj[:, :nf, :nf]  # b*nf*nf
                 face_mask = make_mask(face_mask, nf)  # b*nf
 
                 x_0, e = xe_mask(x=face_bbox, e=fef_adj.unsqueeze(-1), node_mask=face_mask)  # b*nf*6, b*nv*nv*1
@@ -411,7 +429,7 @@ class FaceBboxTrainer:
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict start
-                    pred_noise = self.model(x_t, e, face_mask, class_label, t.unsqueeze(-1))  # b*nv*6
+                    pred_noise = self.model(x_t, e, face_mask, class_label, point_data, t.unsqueeze(-1))  # b*nv*6
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")
@@ -455,8 +473,9 @@ class VertGeomTrainer:
                                     hidden_dims=args.VertGeomModel['hidden_dims'],
                                     act_fn_in=nn.ReLU(),
                                     act_fn_out=nn.ReLU(),
-                                    use_cf=self.use_cf)
-        model = nn.DataParallel(model)    # distributed training
+                                    use_cf=self.use_cf,
+                                    use_pc=self.use_pc)
+        model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
 
         # Initialize diffusion scheduler
@@ -485,6 +504,7 @@ class VertGeomTrainer:
         # Initializer dataloader
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
                                                             shuffle=True,
+                                                            drop_last=True,
                                                             batch_size=args.batch_size,
                                                             num_workers=16)
         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -503,21 +523,28 @@ class VertGeomTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
-                    # b*nv*3, b*1, b*nv*vf*6, b*nv*1, b*ne*2, b*1, b*1
+                if self.use_cf and self.use_pc:
+                    # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1, b*2000*3
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, point_data = data
+                elif self.use_cf:
                     vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label = data
-                else:
-                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, = data
+                    point_data = None
+                elif self.use_pc:
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, point_data = data
                     class_label = None
+                else:
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask = data
+                    class_label = None
+                    point_data = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
-                vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
-                vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
+                vert_geom = vert_geom[:, :nv, ...]  # b*nv*3
+                vertFace_bbox = vertFace_bbox[:, :nv, :vf]  # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
-                vert_mask = make_mask(vert_mask, nv)                          # b*nv
-                vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
+                vert_mask = make_mask(vert_mask, nv)  # b*nv
+                vertFace_mask = make_mask(vertFace_mask, vf)  # b*nv*vf
 
-                edge_mask = make_mask(edge_mask, edge_mask.max())             # b*ne
+                edge_mask = make_mask(edge_mask, edge_mask.max())  # b*ne
                 batch_indices, edge_indices = edge_mask.nonzero(as_tuple=True)
                 rows = edgeVert_adj[batch_indices, edge_indices, 0]
                 cols = edgeVert_adj[batch_indices, edge_indices, 1]
@@ -536,7 +563,8 @@ class VertGeomTrainer:
                 noise = torch.randn(x_0.shape).to(self.device)
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
-                pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))  # b*nv*3
+                pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, point_data,
+                                        t.unsqueeze(-1))  # b*nv*3
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -578,21 +606,28 @@ class VertGeomTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
-                    # b*nv*3, b*1, b*nv*vf*6, b*nv*1, b*ne*2, b*1, b*1
+                if self.use_cf and self.use_pc:
+                    # b*nv*3, b*nv*nv, b*1, b*nv*vf*6, b*nv*1, b*1, b*2000*3
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label, point_data = data
+                elif self.use_cf:
                     vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, class_label = data
-                else:
-                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, = data
+                    point_data = None
+                elif self.use_pc:
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask, point_data = data
                     class_label = None
+                else:
+                    vert_geom, vert_mask, vertFace_bbox, vertFace_mask, edgeVert_adj, edge_mask = data
+                    class_label = None
+                    point_data = None
                 nv = vert_mask.max()
                 vf = vertFace_mask.max()
-                vert_geom = vert_geom[:, :nv, ...]                            # b*nv*3
-                vertFace_bbox = vertFace_bbox[:, :nv, :vf]                    # b*nv*vf*6
+                vert_geom = vert_geom[:, :nv, ...]  # b*nv*3
+                vertFace_bbox = vertFace_bbox[:, :nv, :vf]  # b*nv*vf*6
                 vertFace_mask = vertFace_mask[:, :nv]
-                vert_mask = make_mask(vert_mask, nv)                          # b*nv
-                vertFace_mask = make_mask(vertFace_mask, vf)                  # b*nv*vf
+                vert_mask = make_mask(vert_mask, nv)  # b*nv
+                vertFace_mask = make_mask(vertFace_mask, vf)  # b*nv*vf
 
-                edge_mask = make_mask(edge_mask, edge_mask.max())             # b*ne
+                edge_mask = make_mask(edge_mask, edge_mask.max())  # b*ne
                 batch_indices, edge_indices = edge_mask.nonzero(as_tuple=True)
                 rows = edgeVert_adj[batch_indices, edge_indices, 0]
                 cols = edgeVert_adj[batch_indices, edge_indices, 1]
@@ -614,7 +649,8 @@ class VertGeomTrainer:
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict start
-                    pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, t.unsqueeze(-1))  # b*nv*3
+                    pred_noise = self.model(x_t, e, vert_mask, vertFace_bbox, vertFace_mask, class_label, point_data,
+                                            t.unsqueeze(-1))  # b*nv*3
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")
@@ -635,7 +671,7 @@ class VertGeomTrainer:
                   step=self.iters)
 
     def save_model(self):
-        torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_'+str(self.epoch)+'.pt'))
+        torch.save(self.model.module.state_dict(), os.path.join(self.save_dir, 'epoch_' + str(self.epoch) + '.pt'))
         return
 
 
@@ -658,7 +694,8 @@ class EdgeGeomTrainer:
                                     edge_geom_dim=args.EdgeGeomModel['edge_geom_dim'],
                                     d_model=args.EdgeGeomModel['d_model'],
                                     nhead=args.EdgeGeomModel['nhead'],
-                                    use_cf=self.use_cf)
+                                    use_cf=self.use_cf,
+                                    use_pc=self.use_pc)
         model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
 
@@ -688,6 +725,7 @@ class EdgeGeomTrainer:
         # Initializer dataloader
         self.train_dataloader = torch.utils.data.DataLoader(train_dataset,
                                                             shuffle=True,
+                                                            drop_last=True,
                                                             batch_size=args.batch_size,
                                                             num_workers=16)
         self.val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -709,11 +747,18 @@ class EdgeGeomTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
+                if self.use_cf and self.use_pc:
+                    edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, point_data = data
+                elif self.use_cf:
                     edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
+                    point_data = None
+                elif self.use_pc:
+                    edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, point_data = data
+                    class_label = None
                 else:
                     edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask = data
                     class_label = None
+                    point_data = None
 
                 ne = edge_mask.max().cpu().item()
                 edge_geom = edge_geom[:, :ne, ...]             # b*ne*12
@@ -735,7 +780,7 @@ class EdgeGeomTrainer:
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                 # Predict noise
-                pred_noise = self.model(x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, t.unsqueeze(-1))    # b*ne*12
+                pred_noise = self.model(x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, point_data, t.unsqueeze(-1))    # b*ne*12
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -757,7 +802,7 @@ class EdgeGeomTrainer:
             if self.iters % 20 == 0:
                 wandb.log({"Loss-noise": loss},
                           step=self.iters)
-                print("*****", loss.item())
+                print('******', loss.item())
 
             self.iters += 1
             progress_bar.update(1)
@@ -780,11 +825,18 @@ class EdgeGeomTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
+                if self.use_cf and self.use_pc:
+                    edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, point_data = data
+                elif self.use_cf:
                     edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, class_label = data
+                    point_data = None
+                elif self.use_pc:
+                    edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask, point_data = data
+                    class_label = None
                 else:
                     edge_geom, edgeFace_bbox, edgeVert_geom, edge_mask = data
                     class_label = None
+                    point_data = None
 
                 ne = edge_mask.max().cpu().item()
                 edge_geom = edge_geom[:, :ne, ...]             # b*ne*12
@@ -805,7 +857,7 @@ class EdgeGeomTrainer:
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict noise
-                    pred_noise = self.model(x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, t.unsqueeze(-1))  # b*ne*12
+                    pred_noise = self.model(x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, point_data, t.unsqueeze(-1))  # b*ne*12
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")
@@ -849,8 +901,9 @@ class FaceGeomTrainer:
                                     face_geom_dim=args.FaceGeomModel['face_geom_dim'],
                                     d_model=args.FaceGeomModel['d_model'],
                                     nhead=args.FaceGeomModel['nhead'],
-                                    use_cf=self.use_cf)
-        model = nn.DataParallel(model)    # distributed training
+                                    use_cf=self.use_cf,
+                                    use_pc=self.use_pc)
+        model = nn.DataParallel(model)  # distributed training
         self.model = model.to(self.device).train()
 
         # Initialize diffusion scheduler
@@ -897,40 +950,47 @@ class FaceGeomTrainer:
         for data in self.train_dataloader:
             with torch.cuda.amp.autocast():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
-                    # b*nf*48, b*nf*6, b*nf*fv*3, b*nf*fe*12, b*1, b*nf*1, b*fe*1, b*1
+                if self.use_cf and self.use_pc:
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label, point_data = data
+                elif self.use_cf:
                     face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label = data
+                    point_data = None
+                elif self.use_pc:
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, point_data = data
+                    class_label = None
                 else:
                     face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask = data
                     class_label = None
+                    point_data = None
+
                 nf = face_mask.max()
                 fv = faceVert_mask.max()
                 fe = faceEdge_mask.max()
-                face_geom = face_geom[:, :nf, ...]                   # b*nf*48
-                face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
-                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
-                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf*1
-                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]      # b*nf*fe*12
-                faceEdge_mask = faceEdge_mask[:, :nf, ...]           # b*nf*1
+                face_geom = face_geom[:, :nf, ...]  # b*nf*48
+                face_bbox = face_bbox[:, :nf, :]  # b*nf*6
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]  # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, ...]  # b*nf*1
+                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]  # b*nf*fe*12
+                faceEdge_mask = faceEdge_mask[:, :nf, ...]  # b*nf*1
 
-                face_mask = make_mask(face_mask, nf)                 # b*nf
-                faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
-                faceEdge_mask = make_mask(faceEdge_mask, fe)         # b*nf*fe
+                face_mask = make_mask(face_mask, nf)  # b*nf
+                faceVert_mask = make_mask(faceVert_mask, fv)  # b*nf*fv
+                faceEdge_mask = make_mask(faceEdge_mask, fe)  # b*nf*fe
 
-                x_0 = face_geom * self.z_scaled                      # b*nf*48
+                x_0 = face_geom * self.z_scaled  # b*nf*48
                 x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
                 self.optimizer.zero_grad()  # zero gradient
 
                 # Add noise
                 t = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (x_0.shape[0],),
-                                  device=self.device).long()              # b
-                noise = torch.randn(x_0.shape).to(self.device)            # b*nf*48
+                                  device=self.device).long()  # b
+                noise = torch.randn(x_0.shape).to(self.device)  # b*nf*48
                 x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                 # Predict noise
                 pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask,
-                                        faceEdge_mask, class_label, t.unsqueeze(-1))   # b*n*48
+                                        faceEdge_mask, class_label, point_data, t.unsqueeze(-1))  # b*n*48
 
                 if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                     print("Has nan!!!!")
@@ -972,40 +1032,46 @@ class FaceGeomTrainer:
         for data in self.val_dataloader:
             with torch.no_grad():
                 data = [x.to(self.device) for x in data]
-                if self.use_cf:
-                    # b*nf*48, b*nf*6, b*nf*fv*3, b*nf*fe*12, b*1, b*nf*1, b*fe*1, b*1
+                if self.use_cf and self.use_pc:
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label, point_data = data
+                elif self.use_cf:
                     face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label = data
+                    point_data = None
+                elif self.use_pc:
+                    face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, point_data = data
+                    class_label = None
                 else:
                     face_geom, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask = data
                     class_label = None
+                    point_data = None
                 nf = face_mask.max()
                 fv = faceVert_mask.max()
                 fe = faceEdge_mask.max()
-                face_geom = face_geom[:, :nf, ...]                   # b*nf*48
-                face_bbox = face_bbox[:, :nf, :]                     # b*nf*6
-                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]      # b*nf*fv*3
-                faceVert_mask = faceVert_mask[:, :nf, ...]           # b*nf*1
-                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]      # b*nf*fe*12
-                faceEdge_mask = faceEdge_mask[:, :nf, ...]           # b*nf*1
+                face_geom = face_geom[:, :nf, ...]  # b*nf*48
+                face_bbox = face_bbox[:, :nf, :]  # b*nf*6
+                faceVert_geom = faceVert_geom[:, :nf, :fv, ...]  # b*nf*fv*3
+                faceVert_mask = faceVert_mask[:, :nf, ...]  # b*nf*1
+                faceEdge_geom = faceEdge_geom[:, :nf, :fe, ...]  # b*nf*fe*12
+                faceEdge_mask = faceEdge_mask[:, :nf, ...]  # b*nf*1
 
-                face_mask = make_mask(face_mask, nf)                 # b*nf
-                faceVert_mask = make_mask(faceVert_mask, fv)         # b*nf*fv
-                faceEdge_mask = make_mask(faceEdge_mask, fe)         # b*nf*fe
+                face_mask = make_mask(face_mask, nf)  # b*nf
+                faceVert_mask = make_mask(faceVert_mask, fv)  # b*nf*fv
+                faceEdge_mask = make_mask(faceEdge_mask, fe)  # b*nf*fe
 
-                x_0 = face_geom * self.z_scaled                      # b*nf*48
+                x_0 = face_geom * self.z_scaled  # b*nf*48
                 x_0, _ = xe_mask(x=x_0, node_mask=face_mask)
 
                 total_count += 1
 
                 for idx, step in enumerate([10, 50, 100, 200, 500]):
                     # Evaluate at timestep
-                    t = torch.randint(step - 1, step, (x_0.shape[0], ), device=self.device).long()  # b
+                    t = torch.randint(step - 1, step, (x_0.shape[0],), device=self.device).long()  # b
                     noise = torch.randn(x_0.shape).to(self.device)
                     x_t = self.noise_scheduler.add_noise(x_0, noise, t)
 
                     # Predict noise
                     pred_noise = self.model(x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask,
-                                            faceEdge_mask, class_label, t.unsqueeze(-1))   # b*n*48
+                                            faceEdge_mask, class_label, point_data, t.unsqueeze(-1))  # b*n*48
 
                     if torch.isnan(pred_noise).any() or torch.isinf(pred_noise).any():
                         print("Has nan!!!!")

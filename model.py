@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, Iterable
 from torch_geometric.nn import TransformerConv
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput, is_torch_version
@@ -24,6 +24,8 @@ from torch_geometric.nn import GATConv
 from torch_geometric.utils import to_dense_batch
 from utils import xe_mask, assert_correctly_masked, masked_softmax, pad_and_stack
 from topology.transfer import edge_vert_trans
+from einops import repeat, rearrange
+from collections import namedtuple
 
 from utils import make_mask
 
@@ -1724,7 +1726,7 @@ class GraphformerAttention(nn.Module):
 
 class FaceBboxTransformer(nn.Module):
     def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict, edge_classes: int,
-                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False, use_pc=False):
 
         dropout = 0.1
 
@@ -1734,6 +1736,8 @@ class FaceBboxTransformer(nn.Module):
         self.n_head = hidden_dims['n_head']
         self.max_path_distance = edge_classes
         self.use_cf = use_cf
+        self.use_pc = use_pc
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.time_embed = nn.Sequential(
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
@@ -1768,8 +1772,11 @@ class FaceBboxTransformer(nn.Module):
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.embed_dim)
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=self.embed_dim).to(device)
+            self.point_embd = None
 
-    def forward(self, x_t, e, mask, class_label, t):
+    def forward(self, x_t, e, mask, class_label, point_data, t):
         """
         Args:
         - x_t: b*nf*6
@@ -1786,7 +1793,7 @@ class FaceBboxTransformer(nn.Module):
 
         time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
 
-        tokens = self.mlp_in_X(x_t)+time_embeds
+        tokens = self.mlp_in_X(x_t) + time_embeds
         if self.use_cf:
             if self.training:
                 # randomly set 10% to uncond label
@@ -1794,10 +1801,30 @@ class FaceBboxTransformer(nn.Module):
                 class_label[uncond_mask] = 0
             c_embeds = self.class_embed(class_label)
             tokens += c_embeds
+        if self.use_pc:
+            if self.training:
+                point_data = rearrange(point_data, 'b d n -> b n d')
+                point_data = point_data.float()
+                #  output (batch_size, embed_dim)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, embed_dim)
+                self.point_embd = output.unsqueeze(1)
+            else:
+                if self.point_embd is None or tokens.size(0) != self.point_embd.size(0):
+                    point_data = rearrange(point_data, 'b d n -> b n d')
+                    point_data = point_data.float()
+                    #  output (batch_size, embed_dim)
 
-        spatial_pos_bias = self.spatial_pos_encoder(e)          # [B, nf, nf, num_heads]
+                    output = self.pointModel(point_data)
+                    output = nn.functional.normalize(output, p=2, dim=1)
+                    #  output (batch_size, 1, embed_dim)
+                    self.point_embd = output.unsqueeze(1)
+            tokens += self.point_embd
+
+        spatial_pos_bias = self.spatial_pos_encoder(e)  # [B, nf, nf, num_heads]
         x, e = xe_mask(x=tokens, e=spatial_pos_bias, node_mask=mask)
-        e = spatial_pos_bias.permute(0, 3, 1, 2)                # [B, num_heads, nf, nf]
+        e = spatial_pos_bias.permute(0, 3, 1, 2)  # [B, num_heads, nf, nf]
 
         for norm1, attn, norm2, ffn in self.layers:
             # Pre-LayerNorm
@@ -1807,7 +1834,7 @@ class FaceBboxTransformer(nn.Module):
             attn_out, _ = attn(
                 x_norm, x_norm, x_norm,
                 spatial_bias=e,
-                key_padding_mask=~mask                          # False for valid positions
+                key_padding_mask=~mask  # False for valid positions
             )
 
             x = x + attn_out * mask.unsqueeze(-1)
@@ -1816,7 +1843,7 @@ class FaceBboxTransformer(nn.Module):
             x_norm = norm2(x)
             x = x + ffn(x_norm) * mask.unsqueeze(-1)
 
-        noise = self.mlp_out_X(x)                               # [B, nv, 3]
+        noise = self.mlp_out_X(x)  # [B, nv, 3]
 
         noise = noise * mask.unsqueeze(-1)
 
@@ -1825,7 +1852,7 @@ class FaceBboxTransformer(nn.Module):
 
 class VertGeomTransformer(nn.Module):
     def __init__(self, n_layers: int, hidden_mlp_dims: dict, hidden_dims: dict,
-                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False):
+                 act_fn_in: nn.ReLU(), act_fn_out: nn.ReLU(), use_cf=False, use_pc=False):
 
         dropout = 0.1
 
@@ -1836,7 +1863,8 @@ class VertGeomTransformer(nn.Module):
         self.n_head = hidden_dims['n_head']
         self.max_path_distance = 2
         self.use_cf = use_cf
-
+        self.use_pc = use_pc
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.time_embed = nn.Sequential(
             nn.Linear(hidden_dims['dx'], hidden_dims['dx']),
             nn.LayerNorm(hidden_dims['dx']),
@@ -1877,7 +1905,9 @@ class VertGeomTransformer(nn.Module):
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.embed_dim)
-
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=self.embed_dim).to(device)
+            self.point_embd = None
     # def compute_shortest_path_distance(self, edgeVert_adj, edge_mask):
     #     """计算最短路径距离矩阵"""
     #     batch_size, ne, _ = edgeVert_adj.shape
@@ -1917,7 +1947,7 @@ class VertGeomTransformer(nn.Module):
     #     distances.clamp_(0, self.max_path_distance)
     #     return distances.long()  # 确保是整数类型用于embedding查找
 
-    def forward(self, x_t, e, mask, vertFace_bbox, vertFace_mask, class_label, t):
+    def forward(self, x_t, e, mask, vertFace_bbox, vertFace_mask, class_label, point_data, t):
         """
         Args:
         - x_t: b*nv*3
@@ -1947,6 +1977,26 @@ class VertGeomTransformer(nn.Module):
                 class_label[uncond_mask] = 0
             c_embeds = self.class_embed(class_label)
             tokens += c_embeds
+        if self.use_pc:
+            if self.training:
+                point_data = rearrange(point_data, 'b d n -> b n d')
+                point_data = point_data.float()
+                #  output (batch_size, embed_dim)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, embed_dim)
+                self.point_embd = output.unsqueeze(1)
+            else:
+                if self.point_embd is None or tokens.size(0) != self.point_embd.size(0):
+                    point_data = rearrange(point_data, 'b d n -> b n d')
+                    point_data = point_data.float()
+                    #  output (batch_size, embed_dim)
+                    self.pointModel.eval()
+                    output = self.pointModel(point_data)
+                    output = nn.functional.normalize(output, p=2, dim=1)
+                    #  output (batch_size, 1, embed_dim)
+                    self.point_embd = output.unsqueeze(1)
+            tokens += self.point_embd
 
         spatial_pos_bias = self.spatial_pos_encoder(e)          # [B, nv, nv, num_heads]
         x, e = xe_mask(x=tokens, e=spatial_pos_bias, node_mask=mask)
@@ -2079,10 +2129,12 @@ class EdgeGeomTransformer(nn.Module):
     Transformer-based latent diffusion model for edge feature
     """
 
-    def __init__(self, n_layers: int, edge_geom_dim: int, d_model: int, nhead: int, use_cf: bool):
+    def __init__(self, n_layers: int, edge_geom_dim: int, d_model: int, nhead: int, use_cf: bool, use_pc: bool):
         super(EdgeGeomTransformer, self).__init__()
         self.embed_dim = d_model
         self.use_cf = use_cf
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.use_pc = use_pc
 
         layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=nhead, norm_first=True,
                                            dim_feedforward=1024, dropout=0.1)
@@ -2125,34 +2177,52 @@ class EdgeGeomTransformer(nn.Module):
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.embed_dim)
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=self.embed_dim).to(device)
+            self.point_embd = None
 
         return
 
-    def forward(self, x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, t):   # b*ne*12, b*ne*2*6, b*ne*2*3, b*ne, b*ne*2, b*1, b*1
+    def forward(self, x_t, edgeFace_bbox, edgeVert_geom, edge_mask, class_label, point_data,
+                t):  # b*ne*12, b*ne*2*6, b*ne*2*3, b*ne, b*ne*2, b*1, b*1
         """ forward pass """
 
-        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))    # b*1*embed_dim
-        face_bbox_embeds = self.face_bbox_embed(edgeFace_bbox)                # b*ne*2*embed_dim
+        time_embeds = self.time_embed(sincos_embedding(t, self.embed_dim))  # b*1*embed_dim
+        face_bbox_embeds = self.face_bbox_embed(edgeFace_bbox)  # b*ne*2*embed_dim
 
-        edge_vert_embeds = self.edge_vert_embed(edgeVert_geom).mean(-2)       # b*ne*embed_dim
-        edge_geom_embeds = self.edge_geom_embed(x_t)                          # b*ne*embed_dim
+        edge_vert_embeds = self.edge_vert_embed(edgeVert_geom).mean(-2)  # b*ne*embed_dim
+        edge_geom_embeds = self.edge_geom_embed(x_t)  # b*ne*embed_dim
 
-        tokens = edge_geom_embeds + edge_vert_embeds + time_embeds + face_bbox_embeds.mean(-2)   # b*ne*embed_dim
+        tokens = edge_geom_embeds + edge_vert_embeds + time_embeds + face_bbox_embeds.mean(-2)  # b*ne*embed_dim
 
-        if self.use_cf:
+        if self.use_pc:
             if self.training:
-                # randomly set 10% to uncond label
-                uncond_mask = torch.rand(x_t.shape[0], 1) <= 0.1
-                class_label[uncond_mask] = 0
-            c_embeds = self.class_embed(class_label)
-            tokens += c_embeds
+                point_data = rearrange(point_data, 'b d n -> b n d')
+                point_data = point_data.float()
+                #  output (batch_size, embed_dim)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, embed_dim)
+                self.point_embd = output.unsqueeze(1)
+            else:
+                if self.point_embd is None or tokens.size(0) != self.point_embd.size(0):
+                    point_data = rearrange(point_data, 'b d n -> b n d')
+                    point_data = point_data.float()
+                    #  output (batch_size, embed_dim)
+
+                    output = self.pointModel(point_data)
+                    output = nn.functional.normalize(output, p=2, dim=1)
+                    #  output (batch_size, 1, embed_dim)
+                    self.point_embd = output.unsqueeze(1)
+
+            tokens += self.point_embd
 
         output = self.net(
             src=tokens.permute(1, 0, 2),
             src_key_padding_mask=~edge_mask,
         ).transpose(0, 1)
 
-        pred = self.fc_out(output)     # b*ne*12
+        pred = self.fc_out(output)  # b*ne*12
         return pred
 
 
@@ -2161,11 +2231,12 @@ class FaceGeomTransformer(nn.Module):
     Transformer-based latent diffusion model for face feature
     """
 
-    def __init__(self, n_layers: int, face_geom_dim: int, d_model: int, nhead: int, use_cf: bool):
+    def __init__(self, n_layers: int, face_geom_dim: int, d_model: int, nhead: int, use_cf: bool, use_pc: bool):
         super().__init__()
         self.embed_dim = d_model
         self.use_cf = use_cf
-
+        self.use_pc = use_pc
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         layer = nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=nhead, norm_first=True,
                                            dim_feedforward=1024, dropout=0.1)
         self.net = nn.TransformerEncoder(layer, n_layers, nn.LayerNorm(self.embed_dim))
@@ -2214,8 +2285,11 @@ class FaceGeomTransformer(nn.Module):
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.embed_dim)
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=self.embed_dim).to(device)
+            self.point_embd = None
 
-    def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label, t):
+    def forward(self, x_t, face_bbox, faceVert_geom, faceEdge_geom, face_mask, faceVert_mask, faceEdge_mask, class_label, point_data, t):
         """
             Args:
                 x_t: [batch_size, nf, 48]
@@ -2251,7 +2325,25 @@ class FaceGeomTransformer(nn.Module):
                 class_label[uncond_mask] = 0
             c_embeds = self.class_embed(class_label)
             tokens += c_embeds
-
+        if self.use_pc:
+            if self.training:
+                point_data = rearrange(point_data, 'b d n -> b n d')
+                point_data = point_data.float()
+                #  output (batch_size, embed_dim)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, embed_dim)
+                self.point_embd = output.unsqueeze(1)
+            else:
+                if self.point_embd is None or tokens.size(0) != self.point_embd.size(0):
+                    point_data = rearrange(point_data, 'b d n -> b n d')
+                    point_data = point_data.float()
+                    #  output (batch_size, embed_dim)
+                    output = self.pointModel(point_data)
+                    output = nn.functional.normalize(output, p=2, dim=1)
+                    #  output (batch_size, 1, embed_dim)
+                    self.point_embd = output.unsqueeze(1)
+            tokens += self.point_embd
         output = self.net(
             src=tokens.permute(1, 0, 2),
             src_key_padding_mask=~face_mask,
@@ -2304,17 +2396,214 @@ class MLP(nn.Module):
         return self.mlp(x)
 
 
+SampleResult = namedtuple('SampleResult', ['x', 'xyz', 'sample_idx', 'neighbor_idx'])
+
+
+class BallQuery:
+    @staticmethod
+    def ball_query_pytorch(src, query, radius, k):
+        # src: (b, n, 3)
+        # query: (b, m, 3)
+        b, n = src.shape[:2]
+        m = query.shape[1]
+        dists = torch.cdist(query, src)  # (b, m, n)
+        idx = repeat(torch.arange(n, device=src.device), 'n -> b m n', b=b, m=m)
+        idx = torch.where(dists > radius, n, idx)
+        idx = idx.sort(dim=-1).values[:, :, :k]  # (b, m, k)
+        idx = torch.where(idx == n, idx[:, :, [0]], idx)
+        _dists = dists.gather(-1, idx)  # (b, m, k)
+        return idx, _dists
+
+    @staticmethod
+    def _ball_query(src, query, radius, k):
+        # Adjust dimensions of src and query, then perform the ball query.
+        src = rearrange(src, 'b d n -> b n d')
+        query = rearrange(query, 'b d m -> b m d')
+        return BallQuery.ball_query_pytorch(src, query, radius, k)
+
+
+class PointSampling:
+    @staticmethod
+    def gather(x, idx):
+        # x: (b, d, n)
+        # idx: (b, m, k)
+        # output: (b, d, m, k)
+        m = idx.shape[1]
+        ind = repeat(idx, 'b m k -> b d (m k)', d=x.shape[1])
+        out = x.gather(-1, ind)  # (b, d, (m k))
+        out = rearrange(out, 'b d (m k) -> b d m k', m=m)
+        return out
+
+    @staticmethod
+    def farthest_point_sampling(x: torch.Tensor, n_sample: int, start_idx: int = None):
+        # x: (b, n, 3)
+        b, n = x.shape[:2]
+        assert n_sample <= n, "Not enough points to sample."
+
+        if n_sample == n:
+            return repeat(torch.arange(n_sample, dtype=torch.long, device=x.device), 'm -> b m', b=b)
+
+        # Start index
+        if start_idx is not None:
+            sel_idx = torch.full((b, n_sample), start_idx, dtype=torch.long, device=x.device)
+        else:
+            sel_idx = torch.randint(n, (b, n_sample), dtype=torch.long, device=x.device)
+
+        cur_x = rearrange(x[torch.arange(b), sel_idx[:, 0]], 'b c -> b 1 c')
+        min_dists = torch.full((b, n), dtype=x.dtype, device=x.device, fill_value=float('inf'))
+        for i in range(1, n_sample):
+            # Update distance
+            dists = torch.linalg.norm(x - cur_x, dim=-1)
+            min_dists = torch.minimum(dists, min_dists)
+
+            # Take the farthest
+            idx_farthest = torch.max(min_dists, dim=-1).indices
+            sel_idx[:, i] = idx_farthest
+            cur_x[:, 0, :] = x[torch.arange(b), idx_farthest]
+
+        return sel_idx
+
+    @staticmethod
+    def downsample_fps(xyz, n_sample):
+        # xyz: (b, 3, n)
+        _xyz = rearrange(xyz, 'b d n -> b n d')
+        sample_ind = PointSampling.farthest_point_sampling(_xyz, n_sample, start_idx=0)  # (b, k)
+        sample_xyz = xyz.gather(-1, repeat(sample_ind, 'b k -> b d k', d=xyz.shape[1]))  # (b, 3, k)
+        return SampleResult(None, sample_xyz, sample_ind, None)
+
+
+class SABlock(nn.Module):
+    """
+    Set abstraction block without downsampling.
+    """
+
+    def __init__(
+            self,
+            in_dim,
+            dims: Union[Iterable[int], Iterable[Iterable[int]]] = (64, 64, 128),
+            radius: Union[float, Iterable[float]] = 0.2,
+            k: Union[int, Iterable[int]] = 32
+    ):
+        super().__init__()
+        self.dims_list = dims if isinstance(dims[0], Iterable) else [dims]
+        self.radius_list = radius if isinstance(radius, Iterable) else [radius]
+        self.k_list = k if isinstance(k, Iterable) else [k]
+
+        self.conv_blocks = nn.ModuleList()
+        self.last_norms = nn.ModuleList()
+        for i, (dims, radius, k) in enumerate(zip(self.dims_list, self.radius_list, self.k_list)):
+            dims = [in_dim + 3] + dims
+            conv = nn.Sequential(*[
+                nn.Sequential(nn.Conv2d(in_d, out_d, 1, bias=False),
+                              nn.BatchNorm2d(out_d),
+                              nn.GELU())
+                for in_d, out_d in zip(dims[:-2], dims[1:-1])
+            ])
+            conv.append(nn.Conv2d(dims[-2], dims[-1], 1, bias=False))
+            self.conv_blocks.append(conv)
+            self.last_norms.append(nn.BatchNorm1d(dims[-1]))
+
+    def route(self, src_x, src_xyz, xyz, radius, k, neighbor_idx=None):
+        # src_x: (b, d, n)
+        # src_xyz: (b, 3, n)
+        # xyz: (b, 3, m)
+        if neighbor_idx is None:
+            neighbor_idx = BallQuery._ball_query(src_xyz, xyz, radius, k)[0]  # (b, m, k)
+        neighbor_xyz = PointSampling.gather(src_xyz, neighbor_idx)  # (b, 3, m, k)
+        neighbor_xyz -= xyz[..., None]
+        x = PointSampling.gather(src_x, neighbor_idx)  # (b, d, m, k)
+        x = torch.cat([x, neighbor_xyz], dim=1)  # (b, d+3, m, k)
+        return SampleResult(x, xyz, None, neighbor_idx)
+
+    def forward(self, src_x, src_xyz, xyz):
+        # src_x: (b, d, n)
+        # src_xyz: (b, 3, n)
+        # xyz: (b, 3, m)
+        xs = []
+        for i, (conv_block, norm, radius, k) in enumerate(
+                zip(self.conv_blocks, self.last_norms, self.radius_list, self.k_list)):
+            out = self.route(src_x, src_xyz, xyz, radius, k)
+            x = conv_block(out.x)
+            x = x.max(-1)[0]
+            x = ff.gelu(norm(x))
+            xs.append(x)
+
+        return torch.cat(xs, dim=1)
+
+
+class PointNet2SSG(nn.Module):
+
+    def __init__(
+            self,
+            in_dim,
+            out_dim,
+            *,
+            downsample_points=(512, 128),
+            radii=(0.2, 0.4),
+            ks=(32, 64),
+            head_norm=True,
+            dropout=0.5,
+    ):
+        super().__init__()
+        self.downsample_points = downsample_points
+
+        self.sa1 = SABlock(in_dim, [64, 64, 128], radii[0], ks[0])
+        self.sa2 = SABlock(128, [128, 128, 256], radii[1], ks[1])
+        self.global_sa = nn.Sequential(
+            nn.Conv1d(256, 256, 1, bias=False),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Conv1d(256, 512, 1, bias=False),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Conv1d(512, 1024, 1, bias=False),
+        )
+        norm = nn.BatchNorm1d if head_norm else nn.Identity
+        self.norm = norm(1024)
+        self.act = nn.GELU()
+
+        self.head = nn.Sequential(
+            nn.Linear(1024, 512, bias=False),
+            norm(512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256, bias=False),
+            norm(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, out_dim)
+        )
+
+    def forward(self, xyz):
+        # xyz: (b, 3, n)
+        x = xyz
+        xyz1 = PointSampling.downsample_fps(xyz, self.downsample_points[0]).xyz
+        x1 = self.sa1(x, xyz, xyz1)
+
+        xyz2 = PointSampling.downsample_fps(xyz1, self.downsample_points[1]).xyz
+        x2 = self.sa2(x1, xyz1, xyz2)
+
+        x3 = self.global_sa(x2)
+        out = x3.max(-1)[0]
+        out = self.act(self.norm(out))
+        out = self.head(out)
+        return out
+
+
 class FaceEdgeModel(nn.Module):
-    def __init__(self, nf=32, d_model=128, nhead=4, dim_feedforward=1024, n_layers=4, num_categories=5, use_cf=False):
+    def __init__(self, nf=32, d_model=128, nhead=4, dim_feedforward=1024, n_layers=4, num_categories=5, use_cf=False,
+                 use_pc=False, use_gat=False):
         super().__init__()
         self.nf = nf
         self.seq_len = int(nf * (nf - 1) / 2)
         self.d_model = d_model
         self.use_cf = use_cf
+        self.use_pc = use_pc
+        self.use_gat = use_gat
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.num_categories = num_categories
         self.GATmodel = GAT(num_features=1).to(device)
-        self.GAToptimizer = torch.optim.Adam(self.GATmodel.parameters(), lr=0.01)
+        self.GAToptimizer = torch.optim.Adam(self.GATmodel.parameters(), lr=1e-2)
         self.mlp = MLP(input_dim=self.seq_len * 2, hidden_dim=256, output_dim=self.seq_len * self.d_model).to(device)
 
         self.embedding = nn.Embedding(num_categories + 1, d_model)
@@ -2333,6 +2622,9 @@ class FaceEdgeModel(nn.Module):
 
         if self.use_cf:
             self.class_embed = Embedder(11, self.d_model)
+
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=d_model).to(device)
 
     @staticmethod
     def generate_square_subsequent_mask(sz):
@@ -2429,7 +2721,7 @@ class FaceEdgeModel(nn.Module):
         edge_features = layer_norm(edge_features)
         return edge_features
 
-    def encode(self, src, class_label):
+    def encode(self, src, class_label, point_data):
         """
         Args:
             src: [batch_size, seq_len]
@@ -2437,18 +2729,31 @@ class FaceEdgeModel(nn.Module):
         """
 
         fef_pos_encoding = self.create_positional_encode_fef(src).to(src.device)
-        # node_encode = self.create_GAT_encode(src)
-        # GAT_encode = self.compute_GAT_encode(node_encode)
-        src = self.embedding(src) + self.positional_encoding #+ GAT_encode
 
+        if self.use_gat:
+            node_encode = self.create_GAT_encode(src)
+            GAT_encode = self.compute_GAT_encode(node_encode)
+            src = self.embedding(src) + self.positional_encoding + GAT_encode
+        else:
+            src = self.embedding(src) + self.positional_encoding
         if self.use_cf:
             src += self.class_embed(class_label)
+        if self.use_pc:
+            point_data = rearrange(point_data, 'b d n -> b n d')
+            point_data = point_data.float()
+            #  output (batch_size, d_model)
+            output = self.pointModel(point_data)
+            output = nn.functional.normalize(output, p=2, dim=1)
+            #  output (batch_size, 1, d_model)
+            output = output.unsqueeze(1)
+            point_embd = output.repeat(1, self.seq_len, 1)
+            src += point_embd
 
         # src = self.embedding(src) + self.positional_encoding
         # src shape after embedding: [batch_size, seq_len, d_model]
-        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)     # [batch_size, seq_len, d_model]
-        mu = self.fc_mu(memory.mean(dim=1))                                                   # [batch_size, d_model]
-        logvar = self.fc_logvar(memory.mean(dim=1))                                           # [batch_size, d_model]
+        memory = self.transformer_encoder(src.transpose(0, 1)).transpose(0, 1)  # [batch_size, seq_len, d_model]
+        mu = self.fc_mu(memory.mean(dim=1))  # [batch_size, d_model]
+        logvar = self.fc_logvar(memory.mean(dim=1))  # [batch_size, d_model]
         return mu, logvar
 
     @staticmethod
@@ -2457,7 +2762,7 @@ class FaceEdgeModel(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z, tgt, class_label):
+    def decode(self, z, tgt, class_label, point_embd):
         """
         Args:
             z: [batch_size, d_model]
@@ -2474,6 +2779,10 @@ class FaceEdgeModel(nn.Module):
         if self.use_cf:
             tgt_embedded += self.class_embed(class_label)
 
+        if self.use_pc:
+            point_embd = point_embd.repeat(1, current_seq_len, 1)  # [batch_size, current_seq_len, d_model]
+            tgt_embedded += point_embd
+
         tgt_mask = self.generate_square_subsequent_mask(current_seq_len).to(tgt.device)
 
         memory = z.unsqueeze(0).expand(current_seq_len, batch_size, self.d_model)
@@ -2486,7 +2795,7 @@ class FaceEdgeModel(nn.Module):
 
         return self.output_layer(output)  # [batch_size, current_seq_len, num_categories]
 
-    def forward(self, src, class_label):
+    def forward(self, src, class_label, point_data):
         """
         Args:
             src: [batch_size, seq_len]
@@ -2494,18 +2803,31 @@ class FaceEdgeModel(nn.Module):
         """
 
         src = torch.cat([torch.full((src.shape[0], 1), self.num_categories,
-                                    dtype=src.dtype, device=src.device), src], dim=1)       # b*(seq_len+1)
-        mu, logvar = self.encode(src[:, 1:], class_label)
+                                    dtype=src.dtype, device=src.device), src], dim=1)  # b*(seq_len+1)
+        mu, logvar = self.encode(src[:, 1:], class_label, point_data)
         z = self.reparameterize(mu, logvar)
-        return self.decode(z, src[:, :-1], class_label), mu, logvar
+        point_embd = None
+        if self.use_pc:
+            point_data = rearrange(point_data, 'b d n -> b n d')
+            point_data = point_data.float()
+            point_embd = self.pointModel(point_data)
+            point_embd = nn.functional.normalize(point_embd, p=2, dim=1)
+            point_embd = point_embd.unsqueeze(1)
+        return self.decode(z, src[:, :-1], class_label, point_embd), mu, logvar
 
-    def sample(self, num_samples, class_label=None):
-        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)       # [64,128]
+    def sample(self, num_samples, class_label=None, point_data=None):
+        z = torch.randn(num_samples, self.d_model).to(next(self.parameters()).device)  # [64,128]
         start_token = torch.ones(num_samples, 1).long().to(z.device) * self.num_categories  # [64,1]
         generated = start_token
-
+        point_embd = None
+        if point_data is not None:
+            point_data = rearrange(point_data, 'b d n -> b n d')
+            point_data = point_data.float()
+            point_embd = self.pointModel(point_data)
+            point_embd = nn.functional.normalize(point_embd, p=2, dim=1)
+            point_embd = point_embd.unsqueeze(1)
         for _ in range(self.seq_len):
-            output = self.decode(z, generated, class_label)
+            output = self.decode(z, generated, class_label, point_embd)
             next_token = torch.distributions.Categorical(logits=output[:, -1, :]).sample()
             generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=1)
         torch.cuda.empty_cache()
@@ -2653,7 +2975,8 @@ class TopoDecoder(nn.Module):
 
 class EdgeVertModel(nn.Module):
     def __init__(self, input_face_features=8, emb_features=16, d_model=256,
-                 edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000, n_layers=4, use_cf=False):
+                 edge_classes=5, max_face=50, max_edge=30, max_num_edge=100, max_seq_length=1000, n_layers=4,
+                 use_cf=False, use_pc=False):
         super(EdgeVertModel, self).__init__()
 
         emb_features = d_model
@@ -2663,19 +2986,24 @@ class EdgeVertModel(nn.Module):
         self.max_edge = max_edge
         self.max_num_edge = max_num_edge
 
+        self.point_sample_embd = None
         self.even_embed = nn.Parameter(torch.randn(emb_features))
         self.odd_embed = nn.Parameter(torch.randn(emb_features))
         self.loop_end_embed = nn.Parameter(torch.randn(emb_features))
         self.face_end_embed = nn.Parameter(torch.randn(emb_features))
         self.encoder = TopoEncoder(input_dim=emb_features, d_model=d_model, n_layers=n_layers)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.decoder = TopoDecoder(max_seq_length=max_seq_length, d_model=d_model, n_layers=n_layers)
         self.project_to_pointers = nn.Linear(d_model, d_model)
 
         self.fef_embedding = nn.Embedding(edge_classes, emb_features)
 
         self.use_cf = use_cf
+        self.use_pc = use_pc
         if self.use_cf:
             self.class_embedding = Embedder(11, d_model)
+        if self.use_pc:
+            self.pointModel = PointNet2SSG(in_dim=3, out_dim=d_model).to(device)
 
         self.cache = {}
 
@@ -2689,15 +3017,15 @@ class EdgeVertModel(nn.Module):
 
         batch_size, ne, _ = edgeFace_adj.shape
 
-        edge_feat = self.face_idx_embedding(edgeFace_adj).mean(-2)       # b*ne*embed_features
-        edge_feat += self.fef_embedding(share_id)                        # b*ne*embed_features
+        edge_feat = self.face_idx_embedding(edgeFace_adj).mean(-2)  # b*ne*embed_features
+        edge_feat += self.fef_embedding(share_id)  # b*ne*embed_features
 
         edge_embed = torch.zeros((batch_size, edge_mask.shape[1] * 2, edge_feat.size(-1)),
                                  dtype=edge_feat.dtype, device=edge_feat.device)  # b*ne*m
-        edge_embed[:, 0::2, :] = (edge_feat+self.even_embed)*edge_mask.unsqueeze(-1)
-        edge_embed[:, 1::2, :] = (edge_feat+self.odd_embed)*edge_mask.unsqueeze(-1)
-        edge_num_per = edge_mask.sum(1)                                  # b
-        edge_num_per *= 2                                                # b
+        edge_embed[:, 0::2, :] = (edge_feat + self.even_embed) * edge_mask.unsqueeze(-1)
+        edge_embed[:, 1::2, :] = (edge_feat + self.odd_embed) * edge_mask.unsqueeze(-1)
+        edge_num_per = edge_mask.sum(1)  # b
+        edge_num_per *= 2  # b
 
         edge_mask = make_mask(mask=edge_num_per.unsqueeze(-1), n=edge_embed.shape[1])
 
@@ -2706,23 +3034,43 @@ class EdgeVertModel(nn.Module):
 
         return edge_embed, edge_mask, edge_num_per
 
-    def encoding(self, edge_embed, edge_mask, class_label):
+    def encoding(self, edge_embed, edge_mask, class_label, point_data, is_train):
         batch_size = edge_mask.shape[0]
         edge_embed = torch.cat([
             self.face_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]),
             self.loop_end_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, edge_embed.shape[-1]), edge_embed],
-            dim=1)                                                                 # b*(ne+2)*m
-
+            dim=1)  # b*(ne+2)*m
+        point_embd = None
+        class_embeddings = None
         if self.use_cf:
-            class_embeddings = self.class_embedding(class_label)                   # b*1*d_model
-        else:
-            class_embeddings = None
+            class_embeddings = self.class_embedding(class_label)  # b*1*d_model
+        if self.use_pc:
+            if is_train:
+                point_data = point_data.float()
+                point_data = rearrange(point_data, 'b d n -> b n d')
 
-        edge_mask = torch.nn.functional.pad(edge_mask, [2, 0, 0, 0], value=1)                           # b*(ne+2)
-        edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask, conds=class_embeddings)   # b*(ne+2)*d_model
+                #  output (batch_size, d_model)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, d_model)
+                point_embd = output.unsqueeze(1)
+            else:
+                point_embd = point_data
+
+        if class_embeddings is not None and point_embd is not None:
+            conds = class_embeddings + point_embd
+        elif class_embeddings is not None:
+            conds = class_embeddings
+        elif point_embd is not None:
+            conds = point_embd
+        else:
+            conds = None
+
+        edge_mask = torch.nn.functional.pad(edge_mask, [2, 0, 0, 0], value=1)  # b*(ne+2)
+        edge_embed = self.encoder(edge_embed=edge_embed, edge_mask=edge_mask, conds=conds)  # b*(ne+2)*d_model
         return edge_embed, edge_mask
 
-    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask, share_id, class_label):
+    def forward(self, edgeFace_adj, edge_mask, topo_seq, seq_mask, share_id, class_label, point_data):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
@@ -2739,32 +3087,32 @@ class EdgeVertModel(nn.Module):
         assert torch.all(edge_mask.sum(-1) // 2 - 1 == topo_seq.max(-1)[0] // 2)
 
         # =====================================Transformer Encoding=================================================
-        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label)
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label, point_data, is_train=True)
 
         # =====================================Transformer Decoding=================================================
         batch_size = edge_mask.shape[0]
-        sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)                  # b*(ne+2)*d_model
+        sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)  # b*(ne+2)*d_model
         seq_embed = torch.zeros((batch_size, topo_seq.shape[-1], edge_embed.shape[-1]),
-                                device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
+                                device=edge_embed.device, dtype=edge_embed.dtype)  # b*ns*d_model
         for i in range(batch_size):
-            seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
+            seq_embed[i] = edge_embed[i, :edge_num_per[i] + 2][topo_seq[i] + 2]
 
         # if self.use_cf:
         #     seq_embed += self.class_embedding(class_label)
 
-        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)   # b*ns*d_model
+        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)  # b*ns*d_model
 
         # ========================================Pointer Logits===================================================
-        pred_pointers = self.project_to_pointers(outs)                  # b*ns*d_model
-        edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
+        pred_pointers = self.project_to_pointers(outs)  # b*ns*d_model
+        edge_embed_transposed = edge_embed.transpose(1, 2)  # b*d_model*(ne+2)
         logits = torch.matmul(pred_pointers, edge_embed_transposed)
-        logits = logits / math.sqrt(pred_pointers.shape[-1])            # b*ns*(ne+2)
+        logits = logits / math.sqrt(pred_pointers.shape[-1])  # b*ns*(ne+2)
         logits = logits * edge_mask.unsqueeze(1)
-        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9       # b*ns*(ne+2)
+        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9  # b*ns*(ne+2)
 
         return logits
 
-    def save_cache(self, edgeFace_adj, edge_mask, share_id, class_label):
+    def save_cache(self, edgeFace_adj, edge_mask, share_id, class_label, point_data):
         """
         Args:
             edgeFace_adj: A tensor of shape [batch_size, ne, 2].
@@ -2777,7 +3125,17 @@ class EdgeVertModel(nn.Module):
         edge_embed, edge_mask, edge_num_per = self.graph_feat_extra(edgeFace_adj, edge_mask, share_id)
 
         # =====================================Transformer Encoding=================================================
-        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label)
+        point_embd = None
+        if point_data is not None:
+            point_data = point_data.float()
+            point_data = rearrange(point_data, 'b d n -> b n d')
+
+            #  output (batch_size, d_model)
+            output = self.pointModel(point_data)
+            output = nn.functional.normalize(output, p=2, dim=1)
+            #  output (batch_size, 1, d_mode)
+            point_embd = output.unsqueeze(1)
+        edge_embed, edge_mask = self.encoding(edge_embed, edge_mask, class_label, point_embd, is_train=False)
         sequential_context_embeddings = edge_embed * edge_mask.unsqueeze(-1)  # b*(ne+2)*d_model
 
         self.cache['edge_embed'] = edge_embed
@@ -2788,7 +3146,7 @@ class EdgeVertModel(nn.Module):
     def clear_cache(self):
         self.cache.clear()
 
-    def sample(self, topo_seq, seq_mask, mask, class_label):
+    def sample(self, topo_seq, seq_mask, mask, class_label, point_data):
         """
         Args:
             topo_seq: A tensor of shape [batch_size, ns].
@@ -2800,28 +3158,40 @@ class EdgeVertModel(nn.Module):
         # =====================================Transformer Decoding=================================================
         batch_size = topo_seq.shape[0]
         assert batch_size == 1
-        edge_embed = self.cache['edge_embed']                                                 # b*(ne+2)*d_model
-        edge_mask = self.cache['edge_mask']                                                   # b*(ne+2)
-        sequential_context_embeddings = self.cache['sequential_context_embeddings']           # b*(ne+2)*d_model
+        edge_embed = self.cache['edge_embed']  # b*(ne+2)*d_model
+        edge_mask = self.cache['edge_mask']  # b*(ne+2)
+        sequential_context_embeddings = self.cache['sequential_context_embeddings']  # b*(ne+2)*d_model
         edge_num_per = self.cache['edge_num_per']
         seq_embed = torch.zeros((batch_size, topo_seq.shape[-1], edge_embed.shape[-1]),
-                                device=edge_embed.device, dtype=edge_embed.dtype)             # b*ns*d_model
+                                device=edge_embed.device, dtype=edge_embed.dtype)  # b*ns*d_model
         for i in range(batch_size):
-            seq_embed[i] = edge_embed[i, :edge_num_per[i]+2][topo_seq[i]+2]
+            seq_embed[i] = edge_embed[i, :edge_num_per[i] + 2][topo_seq[i] + 2]
 
         if self.use_cf:
             seq_embed += self.class_embedding(class_label)
 
-        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)    # b*ns*d_model
+        if self.use_pc:
+            if self.point_sample_embd is None:
+                point_data = rearrange(point_data, 'b d n -> b n d')
+                point_data = point_data.float()
+                #  output (batch_size, d_model)
+                output = self.pointModel(point_data)
+                output = nn.functional.normalize(output, p=2, dim=1)
+                #  output (batch_size, 1, d_model)
+                output = output.unsqueeze(1)
+                self.point_sample_embd = output.repeat(1, topo_seq.shape[-1], 1)
+            seq_embed += self.point_sample_embd
+
+        outs = self.decoder(seq_embed, seq_mask, sequential_context_embeddings, edge_mask)  # b*ns*d_model
 
         # ======================================Pointer Logits=====================================================
-        pred_pointers = self.project_to_pointers(outs)[:, [-1], :]      # b*1*d_model
-        edge_embed_transposed = edge_embed.transpose(1, 2)              # b*d_model*(ne+2)
+        pred_pointers = self.project_to_pointers(outs)[:, [-1], :]  # b*1*d_model
+        edge_embed_transposed = edge_embed.transpose(1, 2)  # b*d_model*(ne+2)
         logits = torch.matmul(pred_pointers, edge_embed_transposed)
-        logits = logits / math.sqrt(pred_pointers.shape[-1])            # b*1*(ne+2)
+        logits = logits / math.sqrt(pred_pointers.shape[-1])  # b*1*(ne+2)
         logits = logits * edge_mask.unsqueeze(1)
-        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9       # b*1*(ne+2)
+        logits = logits - (~edge_mask.unsqueeze(1)).float() * 1e9  # b*1*(ne+2)
 
-        logits = logits.squeeze()[mask]                                 # len(mask)
+        logits = logits.squeeze()[mask]  # len(mask)
 
         return logits

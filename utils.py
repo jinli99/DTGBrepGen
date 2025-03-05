@@ -4,6 +4,16 @@ import string
 import numpy as np
 import os
 from collections import defaultdict
+import shutil
+from tqdm import tqdm
+from OCC.Core.STEPControl import STEPControl_AsIs, STEPControl_Reader, STEPControl_Writer
+from OCC.Core.gp import gp_Trsf, gp_Vec, gp_Pnt
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+from OCC.Core.Bnd import Bnd_Box
+from OCC.Core.BRepBndLib import brepbndlib_Add
+from OCC.Core.IFSelect import IFSelect_RetDone
+from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+from OCC.Core.StlAPI import StlAPI_Writer
 
 
 def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
@@ -89,6 +99,121 @@ def check_step_ok(data, max_face=50, max_edge=30, edge_classes=5):
                 non_repeat = np.concatenate([non_repeat, bbox[np.newaxis, :, :]], 0)
         if len(non_repeat) != len(_edge_bbox_):
             return False
+
+    return True
+
+
+def normalize_step(steps, skip=False):
+
+    steps.sort()
+
+    def normalize(step_shape):
+
+        # compute bounding box
+        bbox = Bnd_Box()
+        brepbndlib_Add(step_shape, bbox)
+        x_min, y_min, z_min, x_max, y_max, z_max = bbox.Get()
+        if skip and x_min > -1.1 and y_min > -1.1 and z_min > -1.1 and x_max < 1.1 and y_max < 1.1 and z_min < 1.1:
+            return None
+
+        # compute center point and scale factory
+        center = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2, (z_min + z_max) / 2])
+        sizes = np.array([x_max - x_min, y_max - y_min, z_max - z_min])
+        scale = 2.0 / max(sizes)  # scale to [-1,1]
+
+        # translation
+        transform = gp_Trsf()
+        transform.SetTranslation(gp_Vec(-center[0], -center[1], -center[2]))
+
+        # scale
+        transform_scale = gp_Trsf()
+        transform_scale.SetScale(gp_Pnt(0, 0, 0), scale)
+
+        shape_centered = BRepBuilderAPI_Transform(step_shape, transform).Shape()
+        normalized_shape = BRepBuilderAPI_Transform(shape_centered, transform_scale).Shape()
+
+        return normalized_shape
+
+    for step_path in tqdm(steps):
+        # print(step_path)
+        try:
+            # read STEP file
+            reader = STEPControl_Reader()
+            status = reader.ReadFile(step_path)
+
+            if status != IFSelect_RetDone:
+                raise ValueError(f"cannot load：{step_path}")
+
+            reader.TransferRoot()
+            shape = reader.Shape()
+
+            if shape.IsNull():
+                raise ValueError(f"file{step_path}is None!")
+
+            # normalize step
+            new_shape = normalize(shape)
+
+            # save step file
+            if new_shape is not None:
+                writer = STEPControl_Writer()
+                writer.Transfer(new_shape, STEPControl_AsIs)
+                writer.Write(step_path)
+
+        except Exception as e:
+            print(f"Error processing step {step_path}: {str(e)}")
+
+
+def normalize_stl(stls):
+    import trimesh
+
+    stls.sort()
+
+    def normalize(mesh):
+
+        bounds = mesh.bounds
+        center = (bounds[0] + bounds[1]) / 2.0
+        scale = 2.0 / np.max(bounds[1] - bounds[0])
+
+        translation = trimesh.transformations.translation_matrix(-center)
+        scaling = np.eye(4) * scale
+        scaling[3, 3] = 1.0
+
+        mesh.apply_transform(translation)
+        mesh.apply_transform(scaling)
+
+        return mesh
+
+    for stl_path in tqdm(stls):
+        try:
+            stl = trimesh.load(stl_path)
+            normalized_mesh = normalize(stl)
+            normalized_mesh.export(stl_path)
+
+        except Exception as e:
+            print(f"Error processing STL {stl_path}: {str(e)}")
+
+
+def step2stl(step_file, save_path):
+
+    reader = STEPControl_Reader()
+    status = reader.ReadFile(step_file)
+
+    if status != IFSelect_RetDone:
+        return False
+
+    reader.TransferRoot()
+    shape = reader.Shape()
+
+    mesh = BRepMesh_IncrementalMesh(shape, 0.001)
+    mesh.Perform()
+
+    stl_writer = StlAPI_Writer()
+    stl_writer.SetASCIIMode(False)
+
+    output_path = os.path.join(save_path, os.path.basename(step_file)[:-5] + ".stl")
+
+    if not stl_writer.Write(shape, output_path):
+        return False
 
     return True
 
@@ -453,3 +578,18 @@ def assert_correctly_masked(variable, node_mask):
 def assert_weak_one_hot(variable):
     assert torch.all((variable.sum(dim=-1) <= 1))
     assert torch.all((variable == 0) | (variable == 1))
+
+
+def clear_folder(save_folder):
+    if os.path.exists(save_folder) and os.path.isdir(save_folder):
+        for filename in os.listdir(save_folder):
+            file_path = os.path.join(save_folder, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(e)
+    else:
+        os.makedirs(save_folder)
