@@ -1,20 +1,15 @@
-# DTGBrepGen: A Novel B-rep Generative Model through Decoupling Topology and Geometry 
-(CVPR2025 Submisson Paper ID: 15932)
+# DTGBrepGen: A Novel B-rep Generative Model through Decoupling Topology and Geometry (CVPR 2025)
 
-### Abstract
-Boundary representation (B-rep) of geometric models is a fundamental format in Computer-Aided Design (CAD). However,  automatically generating valid and high-quality B-rep models remains challenging due to the complex interdependence between the topology and geometry of the models. Existing methods tend to prioritize geometric representation while giving insufficient attention to topological constraints, making it difficult to maintain structural validity and geometric accuracy. In this paper, we propose DTGBrepGen, a novel topology-geometry decoupled framework for B-rep generation that explicitly addresses both aspects. Our approach first generates valid topological structures through a two-stage process that independently models edge-face and edge-vertex adjacency relationships. Subsequently, we employ Transformer-based diffusion models for sequential geometry generation, progressively generating vertex coordinates, followed by edge geometries and face geometries which are represented as B-splines. Extensive experiments on diverse CAD datasets show that DTGBrepGen significantly outperforms existing methods in both topological validity and geometric accuracy, achieving higher validity rates and producing more diverse and realistic B-reps.
+![Teaser image](images/pipeline.png)
 
-### Pipeline
-<p align="center">
-  <img src="images/pipeline.png" width="100%">
-</p>
+### About
+DTGBrepGen is a novel framework for automatically generating valid and high-quality Boundary Representation (B-rep) models, addressing the challenges posed by the complex interdependence between topology and geometry in CAD models. Unlike existing methods that prioritize geometric representation while neglecting topological constraints, DTGBrepGen explicitly models both aspects through a two-phase topology generation process followed by a Transformer-based diffusion model for geometry generation.
 
-<p align="center">
-  <img src="images/rotation.gif" width="25%" style="margin-right:5%">
-  <img src="images/9-1.gif" width="20%" style="margin-right:1%">
-  <img src="images/9-2.gif" width="20%" style="margin-right:1%">
-  <img src="images/9.png" width="22%" style="margin-right:1%">
-</p>
+## Features
+- 🏗 **Topology-Geometry Decoupling:** Separates topology and geometry generation, training them independently.  
+- 🔄 **Two-Phase Topology Generation:** Uses Transformers to model **edge-face** and **edge-vertex** adjacencies separately.  
+- 🎯 **B-spline Representations:** Learns **B-spline control points** for precise and compact geometric modeling.  
+- 📊 **Strong Validity & Accuracy:** Ensures high **topological validity** and **geometric accuracy**, surpassing existing methods on CAD datasets.  
 
 
 ### Dependencies
@@ -33,7 +28,7 @@ pip install chamferdist
 For OCCWL installation, follow the instructions [here](https://github.com/AutodeskAILab/occwl).
 
 ### Pre-trained Models
-Download our pre-trained models from this [link](https://drive.google.com/file/d/16326mr27gx16j9ewZirT6g5SCsFaeBG4/view?usp=sharing).
+Download our pre-trained models from this [link](https://drive.google.com/file/d/1p_kgxpGI5a_ir-sLGh2HAMXpiBuoUod4/view?usp=drive_link).
 
 ### Dataset
 You can download the datasets from the following sources:
@@ -50,7 +45,7 @@ To train the model, execute:
 ```
 sh scripts/script.sh
 ```
-This will train all models. To train specific models, comment out the corresponding lines in the script.
+This will train all models. To train specific models, comment out the corresponding lines in the script. We have tested the training on a system with 4 × NVIDIA A800 (80GB) GPUs, and each dataset takes approximately 3 days to train.
 
 ### Sampling
 To generate B-rep models, run:
