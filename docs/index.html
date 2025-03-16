@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="Deformable Neural Radiance Fields creates free-viewpoint portraits (nerfies) from casually captured videos.">
+
+  <meta name="keywords" content="Nerfies, D-NeRF, NeRF">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DTGBrepGen: A Novel B-rep Generative Model through Decoupling Topology and Geometry</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+
+    gtag('js', new Date());
+
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+        rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+  <link rel="icon" href="./static/images/favicon.svg">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+<body>
+
+<nav class="navbar" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+    </a>
+  </div>
+  <div class="navbar-menu">
+
+  </div>
+</nav>
+
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">DTGBrepGen: A Novel B-rep Generative Model through Decoupling Topology and Geometry</h1>
+          <p class="is-size-5 has-text-weight-medium" style="margin-top: 10px; margin-bottom: 20px;">
+            CVPR 2025
+          </p>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">
+              <a href="https://jinli99.github.io/">Jing Li</a><sup>1</sup>,</span>
+            <span class="author-block">
+              <a href="https://github.com/fyx1650">Yihang Fu</a><sup>1</sup>,</span>
+            <span class="author-block">
+              <a href="http://staff.ustc.edu.cn/~chenfl/english.htm">Falai Chen</a><sup>1</sup>,
+            </span>
+          </div>
+
+          <div class="is-size-5 publication-authors">
+            <span class="author-block"><sup>1</sup>University of Science and Technology of China,</span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- PDF Link. -->
+              <span class="link-block">
+                <a href="https://onlinelibrary.wiley.com/doi/abs/10.1111/cgf.15253"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                  </span>
+                  <span>Paper</span>
+                </a>
+              </span>
+              <!-- Code Link. -->
+              <span class="link-block">
+                <a href="https://github.com/jinli99/DTGBrepGen"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code</span>
+                  </a>
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="hero teaser">
+
+    <div class="container is-max-desktop">
+    <div class="hero-body">
+      <video id="teaser" autoplay muted loop playsinline height="100%">
+        <source src="./static/images/video.mp4"
+                type="video/mp4">
+      </video>
+      <h2 class="subtitle has-text-centered">
+      </h2>
+    </div>
+   </div>
+
+  <div class="container is-max-desktop">
+    <div class="hero-body">
+      <img id="teaser-image" src="./static/images/pipeline.png" alt="Teaser Image" style="height: 100%; width: auto;">
+      <h2 class="subtitle has-text-centered">
+        <span class="dnerf">DTGBrepGen</span> is a novel framework that sequentially generates topologically valid and geometrically high-quality B-rep models.
+      </h2>
+    </div>
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <!-- Abstract. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>
+            Boundary representation (B-rep) of geometric models is a fundamental format in Computer-Aided Design (CAD).
+            However, automatically generating valid and high-quality B-rep models remains challenging due to the complex
+            interdependence between the topology and geometry of the models. Existing methods tend to prioritize geometric
+            representation while giving insufficient attention to topological constraints, making it difficult to
+            maintain structural validity and geometric accuracy.
+          </p>
+          <p>
+            In this paper, we propose DTGBrepGen, a novel topology-geometry decoupled framework for B-rep generation
+            that explicitly addresses both aspects. Our approach first generates valid topological structures through
+            a two-stage process that independently models edge-face and edge-vertex adjacency relationships.
+            Subsequently, we employ Transformer-based diffusion models for sequential geometry generation, progressively
+            generating vertex coordinates, followed by edge geometries and face geometries which are represented as B-splines.
+          </p>
+          <p>
+            Extensive experiments on diverse CAD datasets show that DTGBrepGen significantly outperforms existing methods
+            in both topological validity and geometric accuracy, achieving higher validity rates and producing more diverse and realistic B-reps.
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Abstract. -->
+
+    <!-- Paper video. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Video</h2>
+        <div class="publication-video">
+        <iframe width="560" height="315" src="https://www.youtube.com/embed/jvaqQgGYoik?si=7r9dXwGzLJz2yDY0" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+        </div>
+      </div>
+    </div>
+    <!--/ Paper video. -->
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-desktop">
+
+    <div class="content">
+        <!-- Title -->
+        <h2 class="title is-3">Qualitative Results</h2>
+
+        <!-- Description -->
+        <p>
+            Our method generates B-rep models with enhanced structural validity and geometric fidelity, as demonstrated by the generated examples.
+        </p>
+
+        <!-- Images in a row -->
+        <div style="display: flex; justify-content: center;">
+            <img
+                id="deepcad"
+                src="./static/images/deepcad.png"
+                alt="Teaser Image"
+                style="height: auto; width: 60%;"
+            >
+        </div>
+    </div>
+
+    <div class="content">
+        <!-- Title -->
+        <h2 class="title is-3">Qualitative Comparison</h2>
+
+        <!-- Description -->
+        <p>
+            Our method generates more realistic and geometrically precise B-rep models than baseline approaches (DeepCAD and BrepGen) on the DeepCAD dataset.
+        </p>
+
+        <!-- Images in a row -->
+        <div class="is-flex is-justify-content-center" style="gap: 20px; align-items: flex-start;">
+            <!-- Image 1 -->
+            <figure style="text-align: center; margin: 0;">
+                <img src="./static/images/deepcad_deepcad.png" alt="DeepCAD" style="height: 200px; width: auto;">
+                <figcaption>DeepCAD</figcaption>
+            </figure>
+            <!-- Image 2 -->
+            <figure style="text-align: center; margin: 0;">
+                <img src="./static/images/deepcad_brepgen.png" alt="BrepGen" style="height: 200px; width: auto;">
+                <figcaption>BrepGen</figcaption>
+            </figure>
+            <!-- Image 3 -->
+            <figure style="text-align: center; margin: 0;">
+                <img src="./static/images/deepcad_ours.png" alt="DTGBrepGen (ours)" style="height: 200px; width: auto;">
+                <figcaption>DTGBrepGen (ours)</figcaption>
+            </figure>
+        </div>
+    </div>
+
+    <div class="content">
+        <!-- Title -->
+        <h2 class="title is-3">Class-Conditioned Generation</h2>
+
+        <!-- Description -->
+        <p>
+            Examples of class-conditioned generation on the Furniture dataset, with distinct colors representing different categories.
+        </p>
+
+        <!-- Images in a row -->
+        <div class="is-flex is-justify-content-center is-align-items-center" style="gap: 10px;">
+            <img src="./static/images/furniture1.png" alt="Image 1" style="height: 300px; width: auto;">
+            <img src="./static/images/furniture2.png" alt="Image 2" style="height: 300px; width: auto;">
+        </div>
+    </div>
+
+   <div class="content">
+        <!-- Title -->
+        <h2 class="title is-3">Point Cloud-Conditioned Generation</h2>
+
+        <!-- Description -->
+        <p>
+            B-rep models generated based on input point clouds. Each example consists of a point cloud alongside three corresponding generated B-reps
+        </p>
+
+        <!-- Images in a row -->
+        <div style="display: flex; justify-content: center;">
+            <img
+                id="point2brep"
+                src="./static/images/point2brep.png"
+                alt="Teaser Image"
+                style="height: auto; width: 60%;"
+            >
+        </div>
+    </div>
+
+    <!--/ Matting. -->
+
+    <!-- Concurrent Work. -->
+    <div class="columns is-centered">
+      <div class="column is-full-width">
+        <h2 class="title is-3">Related Links</h2>
+
+        <div class="content has-text-justified">
+          <p>
+            <a href="https://github.com/samxuxiang/BrepGen">BrepGen</a>
+          </p>
+          <p>
+            <a href="https://github.com/ChrisWu1997/DeepCAD">DeepCAD</a>
+          </p>
+
+        </div>
+      </div>
+    </div>
+    <!--/ Concurrent Work. -->
+
+  </div>
+</section>
+
+
+<!--<section class="section" id="BibTeX">-->
+<!--  <div class="container is-max-desktop content">-->
+<!--    <h2 class="title">BibTeX</h2>-->
+<!--    <pre><code>@inproceedings{li2024ishapediting,-->
+<!--  title={iShapEditing: Intelligent Shape Editing with Diffusion Models},-->
+<!--  author={Li, Jing and Zhang, Juyong and Chen, Falai},-->
+<!--  booktitle={Computer Graphics Forum},-->
+<!--  pages={e15253},-->
+<!--  year={2024},-->
+<!--  organization={Wiley Online Library}-->
+<!--}-->
+<!--</code></pre>-->
+<!--  </div>-->
+<!--</section>-->
+
+
+<footer class="footer">
+  <div class="container" style="text-align: center;">
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            Source code mainly based on <a href="https://nerfies.github.io/">Nerfies website</a>.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
