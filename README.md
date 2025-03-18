@@ -1,9 +1,11 @@
 # DTGBrepGen: A Novel B-rep Generative Model through Decoupling Topology and Geometry (CVPR 2025)
 
-![Teaser image](images/pipeline.png)
+![Teaser image](docs/static/images/pipeline.png)
 
 ### About
 DTGBrepGen is a novel framework for automatically generating valid and high-quality Boundary Representation (B-rep) models, addressing the challenges posed by the complex interdependence between topology and geometry in CAD models. Unlike existing methods that prioritize geometric representation while neglecting topological constraints, DTGBrepGen explicitly models both aspects through a two-phase topology generation process followed by a Transformer-based diffusion model for geometry generation.
+
+[[Project Page]](https://jinli99.github.io/DTGBrepGen/) | [[Paper]](https://arxiv.org/abs/2503.13110)
 
 ## Features
 - 🏗 **Topology-Geometry Decoupling:** Separates topology and geometry generation, training them independently.  
