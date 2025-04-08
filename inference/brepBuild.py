@@ -33,7 +33,115 @@ from OCC.Core.GCPnts import GCPnts_UniformAbscissa
 from utils import load_data_with_prefix
 from inference.primitive_fitting import process_one_surface
 from topology.transfer import face_edge_trans
-from comparison.metrics import check_brep_validity
+from OCC.Core.TopoDS import topods_Shell, topods_Wire, topods_Face, topods_Edge, TopoDS_Solid
+from OCC.Core.ShapeAnalysis import ShapeAnalysis_Wire, ShapeAnalysis_Shell, ShapeAnalysis_FreeBounds
+from OCC.Core.TopExp import TopExp_Explorer
+from OCC.Core.TopAbs import TopAbs_WIRE, TopAbs_SHELL, TopAbs_FACE, TopAbs_EDGE
+from OCC.Core.BRep import BRep_Tool
+from occwl.io import load_step
+
+
+def check_brep_validity(step_file_path):
+
+    if isinstance(step_file_path, str):
+        # Read the STEP file
+        step_reader = STEPControl_Reader()
+        status = step_reader.ReadFile(step_file_path)
+
+        if status != IFSelect_RetDone:
+            print("Error: Unable to read STEP file")
+            return False
+
+        step_reader.TransferRoot()
+        shape = step_reader.Shape()
+
+    elif isinstance(step_file_path, TopoDS_Solid):
+        shape = step_file_path
+
+    else:
+        return False
+
+    # Initialize check results
+    wire_order_ok = True
+    wire_self_intersection_ok = True
+    shell_bad_edges_ok = True
+    brep_closed_ok = True  # Initialize closed BRep check
+    solid_one_ok = True
+
+    # 1. Check if BRep has more than one solid
+    if isinstance(step_file_path, str):
+        try:
+            cad_solid = load_step(step_file_path)
+            if len(cad_solid) != 1:
+                solid_one_ok = False
+        except Exception as e:
+            return False
+
+    # 2. Check all wires
+    face_explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while face_explorer.More():
+        face = topods_Face(face_explorer.Current())
+        wire_explorer = TopExp_Explorer(face, TopAbs_WIRE)
+        while wire_explorer.More():
+            wire = topods_Wire(wire_explorer.Current())
+
+            # Create a ShapeFix_Wire object
+            wire_fixer = ShapeFix_Wire(wire, face, 0.01)
+            wire_fixer.Load(wire)
+            wire_fixer.SetFace(face)
+            wire_fixer.SetPrecision(0.01)
+            wire_fixer.SetMaxTolerance(1)
+            wire_fixer.SetMinTolerance(0.0001)
+
+            # Fix the wire
+            wire_fixer.Perform()
+            fixed_wire = wire_fixer.Wire()
+
+            # Analyze the fixed wire
+            wire_analysis = ShapeAnalysis_Wire(fixed_wire, face, 0.01)
+            wire_analysis.Load(fixed_wire)
+            wire_analysis.SetPrecision(0.01)
+            wire_analysis.SetSurface(BRep_Tool.Surface(face))
+
+            # 1. Check wire edge order
+            order_status = wire_analysis.CheckOrder()
+            if order_status != 0:  # 0 means no error
+                # print(f"Wire order issue detected: {order_status}")
+                wire_order_ok = False
+
+            # 2. Check wire self-intersection
+            if wire_analysis.CheckSelfIntersection():
+                wire_self_intersection_ok = False
+
+            wire_explorer.Next()
+        face_explorer.Next()
+
+    # 3. Check for bad edges in shells
+    shell_explorer = TopExp_Explorer(shape, TopAbs_SHELL)
+    while shell_explorer.More():
+        shell = topods_Shell(shell_explorer.Current())
+        shell_analysis = ShapeAnalysis_Shell()
+        shell_analysis.LoadShells(shell)
+
+        if shell_analysis.HasBadEdges():
+            shell_bad_edges_ok = False
+
+        shell_explorer.Next()
+
+    # 4. Check if BRep is closed (no free edges)
+    free_bounds = ShapeAnalysis_FreeBounds(shape)
+    free_edges = free_bounds.GetOpenWires()
+    edge_explorer = TopExp_Explorer(free_edges, TopAbs_EDGE)
+    num_free_edges = 0
+    while edge_explorer.More():
+        edge = topods_Edge(edge_explorer.Current())
+        num_free_edges += 1
+        # print(f"Free edge: {edge}")
+        edge_explorer.Next()
+    if num_free_edges > 0:
+        brep_closed_ok = False
+
+    return int(wire_order_ok and wire_self_intersection_ok and shell_bad_edges_ok and brep_closed_ok and solid_one_ok)
 
 
 class Brep2Mesh:
